@@ -9,7 +9,8 @@
 #                 "TASKS_AXI: available", "TANGLE: <remediation>",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: <window-targets...>",
-#                 "FMX: X mode on ..." or "FMX: X mode off ...".
+#                 "FMX: X mode on ..." or "FMX: X mode off ...",
+#                 "FME: email mode on ..." or "FME: email mode off ...".
 #          A NUDGE_SECONDMATES line lists the RUNNING secondmate windows whose
 #          worktree was fast-forwarded to firstmate's own current default-branch
 #          commit (a purely LOCAL fast-forward, never an origin fetch) AND whose
@@ -30,6 +31,10 @@
 #          X mode is OPTIONAL and inert unless FM_HOME/.env has a non-empty
 #          FMX_PAIRING_TOKEN. When opted in, bootstrap requires curl+jq, writes
 #          the relay poll shim and 30s cadence config, and prints an FMX line.
+#          Email mode is OPTIONAL and inert unless FM_HOME/.env opts in
+#          (FM_EMAIL_NOTIFY truthy) with AGENTMAIL_API_KEY, FM_NOTIFY_EMAIL, and
+#          AGENTMAIL_INBOX. When opted in, bootstrap requires curl+jq, writes the
+#          notifier check shim and 60s cadence config, and prints an FME line.
 #          Fleet sync fetches, fast-forwards safe default-branch states, reports
 #          recovered and STUCK clone drift, and prunes gone local branches; it is
 #          bounded by FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT, default 20s.
@@ -52,6 +57,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 # shellcheck source=bin/fm-x-lib.sh
 . "$SCRIPT_DIR/fm-x-lib.sh"
+# shellcheck source=bin/fm-email-lib.sh
+. "$SCRIPT_DIR/fm-email-lib.sh"
 
 fleet_sync() {
   [ -x "$FM_ROOT/bin/fm-fleet-sync.sh" ] || return 0
@@ -268,6 +275,111 @@ EOF
   echo "FMX: X mode on - relay poll armed via state/x-watch.check.sh; 30s watcher cadence in config/x-mode.env"
 }
 
+# Email mode (opt-in): when this home's .env opts in (FM_EMAIL_NOTIFY truthy) and
+# carries the AgentMail key, recipient, and inbox, wire the two-way email notifier
+# into the EXISTING watcher check mechanism without touching fm-watch.sh or any
+# other watcher-backbone file. Drops two idempotent, gitignored artifacts:
+#   state/email-watch.check.sh - check shim that runs the outbound notifier
+#       (silent) then the inbound poll each cycle; the poll's output becomes a
+#       check: wake (mirrors X mode's shim)
+#   config/email-mode.env      - exports FM_CHECK_INTERVAL=60, sourced by the
+#       watcher arm so an email instance polls at a 60s cadence
+# Inert unless opted in: with FM_EMAIL_NOTIFY absent/falsey AND no leftover
+# artifacts it is a complete no-op (a non-user sees zero change). On opt-out, or
+# when opted in but missing required config or curl/jq, it removes any artifacts so
+# the instance reverts to the default 300s no-poll behavior, printing one FME line.
+# It never touches the watcher itself; applying a cadence transition to a running
+# watcher is the caller's job via 'bin/fm-watch-arm.sh --restart' (AGENTS.md).
+email_mode_setup() {
+  local env_file notify key to inbox shim cadence shim_body cadence_body tool missing
+  env_file="$FM_HOME/.env"
+  shim="$STATE/email-watch.check.sh"
+  cadence="$CONFIG/email-mode.env"
+
+  notify=
+  key=
+  to=
+  inbox=
+  if [ -f "$env_file" ]; then
+    notify=$(fme_env_get FM_EMAIL_NOTIFY "$env_file")
+    key=$(fme_env_get AGENTMAIL_API_KEY "$env_file")
+    to=$(fme_env_get FM_NOTIFY_EMAIL "$env_file")
+    inbox=$(fme_env_get AGENTMAIL_INBOX "$env_file")
+  fi
+
+  email_mode_remove_artifacts() {
+    rm -f "$shim" "$cadence" 2>/dev/null || true
+    [ ! -e "$shim" ] && [ ! -e "$cadence" ]
+  }
+
+  # Not opted in: stay silent unless we actually remove leftover artifacts.
+  if ! fme_truthy "$notify"; then
+    if [ -e "$shim" ] || [ -e "$cadence" ]; then
+      if email_mode_remove_artifacts; then
+        echo "FME: email mode off - removed notifier shim and 60s cadence; restart the watcher (bin/fm-watch-arm.sh --restart) to drop back to the default cadence"
+      else
+        echo "FME: email mode off - failed to remove notifier shim or 60s cadence"
+      fi
+    fi
+    return 0
+  fi
+
+  # Opted in but missing required config: cannot run; clean up and report once.
+  if [ -z "$key" ] || [ -z "$to" ] || [ -z "$inbox" ]; then
+    email_mode_remove_artifacts || true
+    echo "FME: email mode off - opted in but missing AGENTMAIL_API_KEY, FM_NOTIFY_EMAIL, or AGENTMAIL_INBOX in .env"
+    return 0
+  fi
+
+  missing=0
+  for tool in curl jq; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+      echo "MISSING: $tool (install: $(install_cmd "$tool"))"
+      missing=1
+    fi
+  done
+  if [ "$missing" -ne 0 ]; then
+    email_mode_remove_artifacts || true
+    echo "FME: email mode off - missing notifier dependencies; install them and rerun bootstrap"
+    return 0
+  fi
+
+  email_arm_failed() {
+    if email_mode_remove_artifacts; then
+      echo "FME: email mode off - failed to arm notifier shim or 60s cadence"
+    else
+      echo "FME: email mode off - failed to arm notifier shim or 60s cadence; stale artifacts remain"
+    fi
+  }
+
+  mkdir -p "$STATE" "$CONFIG" 2>/dev/null || { email_arm_failed; return 0; }
+
+  shim_body=$(cat <<EOF
+#!/usr/bin/env bash
+# Auto-generated by fm-bootstrap.sh - email notifier check shim.
+# The watcher runs this each check cycle: the outbound notifier sends any pending
+# emails silently, then the inbound poll runs and its output becomes a check: wake.
+export FM_HOME=$(printf '%q' "$FM_HOME")
+$(printf '%q' "$FM_ROOT/bin/fm-email-notify.sh") >/dev/null 2>&1 || true
+exec $(printf '%q' "$FM_ROOT/bin/fm-email-poll.sh")
+EOF
+)
+  write_if_changed "$shim" "$shim_body" || { email_arm_failed; return 0; }
+  chmod +x "$shim" 2>/dev/null || { email_arm_failed; return 0; }
+
+  cadence_body=$(cat <<'EOF'
+# Auto-generated by fm-bootstrap.sh - email notifier watcher cadence.
+# Source this before arming the watcher (see AGENTS.md "Email mode") so
+# fm-watch.sh polls the inbox every 60s. Non-email instances have no such file and
+# keep the default 300s cadence.
+export FM_CHECK_INTERVAL=60
+EOF
+)
+  write_if_changed "$cadence" "$cadence_body" || { email_arm_failed; return 0; }
+
+  echo "FME: email mode on - notifier armed via state/email-watch.check.sh; 60s watcher cadence in config/email-mode.env"
+}
+
 if [ "${1:-}" = "install" ]; then
   shift
   [ $# -gt 0 ] || { echo "usage: fm-bootstrap.sh install <tool>..." >&2; exit 1; }
@@ -304,5 +416,6 @@ crew=
 fm_tasks_axi_compatible && echo "TASKS_AXI: available"
 secondmate_sync
 x_mode_setup
+email_mode_setup
 fleet_sync
 exit 0

@@ -47,6 +47,7 @@ This is.. a directory that turns any agent into your firstmate, and you the capt
 - **Optional secondmates** - opt in to persistent domain supervisors that run from isolated firstmate homes with their own `FM_HOME`, state, projects, and session lock, kept on the primary firstmate version by guarded local fast-forwards.
 - **Event-driven, zero-token supervision** - a bash watcher sleeps on the fleet and wakes the first mate only when something needs you.
 - **Optional X mode** - opt in with one local `.env` token so firstmate can answer your public `@myfirstmate` mentions, act on normal reversible mention requests through the same lifecycle as chat requests, acknowledge spawned work, and post one public-safe completion follow-up without changing non-X behavior; dry-run preview records would-be replies and dismissals locally before go-live.
+- **Optional email mode** - opt in with local `.env` settings (`FM_EMAIL_NOTIFY=1` plus an AgentMail key, recipient, and inbox) so firstmate emails you when something captain-relevant comes up and lets you reply by email to steer it; purely additive, riding the same watcher checks, with a `FM_EMAIL_DRY_RUN` preview and zero behavior change when off.
 - **Guarded by construction** - the first mate is read-only over your projects outside guarded clone refreshes, safe branch pruning, and approved `local-only` fast-forward merges; crewmates make every project change behind your merge approval.
 - **Restart-proof** - all state lives on disk and in tmux; kill the session anytime and the next one reconciles and carries on.
 
