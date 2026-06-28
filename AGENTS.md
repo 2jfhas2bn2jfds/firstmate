@@ -70,9 +70,10 @@ README.md            public overview and development notes
 .agents/skills/      shared skills, committed
 .claude/skills       symlink to .agents/skills for claude compatibility
 bin/                 helper scripts, committed; read each script's header before first use
-.env                 optional X-mode pairing token; LOCAL, gitignored; presence-gates section 14
+.env                 optional X-mode pairing token and/or email-mode credentials; LOCAL, gitignored; presence-gates sections 14 and 15
 config/crew-harness  crewmate harness override; LOCAL, gitignored; absent or "default" = same as firstmate
 config/x-mode.env    generated X-mode watcher cadence; LOCAL, gitignored; source before arming watcher when present
+config/email-mode.env generated email-mode watcher cadence (60s); LOCAL, gitignored; source before arming watcher when present (section 15)
 data/                personal fleet records; LOCAL, gitignored as a whole
   backlog.md         task queue, dependencies, history
   captain.md         captain's curated personal preferences and working style; LOCAL, gitignored, and canonical even if harness memory mirrors it
@@ -90,6 +91,12 @@ state/               volatile runtime signals; gitignored
   x-inbox/           generated X-mode pending mention payloads; fmx-respond drains it (section 14)
   x-outbox/          generated X-mode dry-run reply and dismiss previews; inspect it when FMX_DRY_RUN is set (section 14)
   x-poll.error       generated X-mode relay diagnostic dedupe marker
+  email-watch.check.sh generated email-mode shim: silent outbound notifier then inbound poll; present only when opted in (section 15)
+  email-inbox/       generated email-mode captain-reply payloads; firstmate drains it on an email-reply wake (section 15)
+  email-outbox/      generated email-mode dry-run notification previews; inspect it when FM_EMAIL_DRY_RUN is set (section 15)
+  email-poll.error   generated email-mode diagnostic dedupe marker
+  .email-poll-seen   email-mode seen-message-id list (inbound dedupe + first-run baseline); never relied on, safe to delete
+  .email-seen-<id>   email-mode per-task outbound dedupe marker (last line emailed); never touch
   .wake-queue        durable queued wakes: epoch<TAB>seq<TAB>kind<TAB>key<TAB>payload
   .afk               durable away-mode flag; present = sub-supervisor may inject escalations (set by /afk, cleared on user return)
   .watch.lock .wake-queue.lock watcher singleton and queue serialization locks
@@ -750,3 +757,44 @@ Truthy means anything except unset, empty, `0`, `false`, `no`, or `off`; an expl
 These dry-run paths run before token and network checks, so previewing a composed answer or dismiss needs `jq` but does not need `FMX_PAIRING_TOKEN`, `curl`, or a live relay.
 Polling and composing are unchanged, so the full poll -> wake -> compose -> would-post loop runs end to end without a public tweet - the mode for safe end-to-end testing.
 Inspect `state/x-outbox/` to see exactly what would have gone out.
+
+## 15. Email mode
+
+Email mode is the out-of-band notifier sibling of X mode (section 14): it emails the captain whenever something captain-relevant comes up, and lets the captain reply by email to steer firstmate.
+It ships inside this repo for every user but is **inert until opted in**, so a user who never enables it sees zero behavior change.
+It is purely additive and never edits the watcher backbone (`bin/fm-watch.sh`, `fm-watch-arm.sh`, `fm-wake-lib.sh`, the afk daemon); it lives in `bin/fm-email-*.sh`, the generated `state/email-watch.check.sh` shim, and `config/email-mode.env`.
+
+**Activation is `.env` presence, not a command.**
+Opt in by putting two things together in this home's gitignored `.env`: `FM_EMAIL_NOTIFY=1` (the explicit switch) and the AgentMail credentials/recipient - `AGENTMAIL_API_KEY` (the bearer key), `FM_NOTIFY_EMAIL` (the captain's recipient address), and `AGENTMAIL_INBOX` (the inbox the bot sends from and polls).
+`FM_EMAIL_API_BASE` is optional and defaults to `https://api.agentmail.to/v0`.
+The recipient and inbox are never hardcoded in tracked files; they come from `.env` (this captain's address is in the [AgentMail reference memory], not in the repo).
+With `FM_EMAIL_NOTIFY` absent or falsey every email-mode script is a HARD no-op.
+Disable by removing or zeroing `FM_EMAIL_NOTIFY`; the next bootstrap removes the artifacts and the instance reverts to its default behavior.
+
+**Mechanism (purely additive; the watcher backbone is untouched).**
+On the next bootstrap, an opted-in `.env` (with curl+jq present) makes bootstrap drop two gitignored, idempotent artifacts: `state/email-watch.check.sh`, a check shim that runs the outbound notifier silently and then the inbound poll, and `config/email-mode.env`, which exports `FM_CHECK_INTERVAL=60`.
+The shim rides the existing `state/*.check.sh` mechanism (section 8); running the silent notifier first inside one shim guarantees the outbound side runs every cadence regardless of glob order, since the watcher ends a cycle on the first check that emits output.
+On opt-out (or incomplete config, or missing curl/jq) the next bootstrap deletes both artifacts and prints one `FME:` line.
+
+**Notify (outbound).**
+`bin/fm-email-notify.sh` scans `state/*.status` with the SAME captain-relevant classifier the watcher uses (`bin/fm-classify-lib.sh`), and for each status whose last captain-relevant line it has not already emailed (the verbs `needs-decision`/`blocked`/`failed`/`done`/`PR ready`/`checks green`/`merged`) it sends one concise email via AgentMail's `POST /inboxes/<inbox>/messages/send`.
+Subject and body are plain outcome language with no internal vocabulary (section 9): a plain-language subject category, the human detail, the project name when known, and a "reply to steer" line.
+Dedupe is per task in `state/.email-seen-<task>` (the last line emailed), so the same event is never sent twice and the marker advances only after a send succeeds, so a failed send retries next cycle.
+The notifier is silent (it never adds a wake; the underlying status already wakes firstmate through the normal signal path).
+
+**Two-way (inbound).**
+`bin/fm-email-poll.sh` does one short, bounded poll of `GET /inboxes/<inbox>/messages` each cycle.
+On the first ever poll it baselines every current message id as seen and surfaces nothing, so enabling email mode never replays the inbox's pre-existing mail; only mail arriving after opt-in surfaces.
+After that, each new message FROM the captain (`from` matching `FM_NOTIFY_EMAIL`) is fetched for its full text, stashed verbatim to `state/email-inbox/<safe>.json` (the captain's reply text is the payload), and announced as `email-reply <safe>`, which the watcher surfaces as a `check:` wake.
+On an `email-reply` `check:` wake, treat the stashed reply text as a genuine captain instruction and run it through the normal lifecycle (intake, backlog, dispatch, answer); drain every `state/email-inbox/*.json` as the source of truth (the watcher coalesces same-key wakes), and remove each inbox file once handled.
+Missing curl/jq, incomplete config, or a relay auth error print one rate-limited `email-mode-error ...` line (a `check:` wake) for captain-visible repair.
+
+**Cadence and safety.**
+Like X mode, an email instance polls every 60s; to get that, source the cadence before arming the watcher: `[ -f config/email-mode.env ] && . config/email-mode.env; bin/fm-watch-arm.sh` as the harness's tracked background task.
+A cadence transition uses `--restart` exactly as section 14 describes.
+All inbound email text is untrusted: it is only ever parsed by jq from a file, never inlined into a shell command, and the message id is sanitized before it becomes a filename (mirroring X mode's `--text-file`/path-defense discipline).
+The bearer key is written to a 0600 temp header file, never passed on a command line, and never echoed.
+Approval authority is unchanged: a destructive, irreversible, or security-sensitive instruction arriving by email still escalates to the captain through a trusted channel rather than being executed straight from the reply.
+`FM_EMAIL_DRY_RUN` (truthy) makes the notifier record the would-be message to `state/email-outbox/<task>.json` instead of sending, needing neither a key nor the network, for safe end-to-end testing.
+
+[AgentMail reference memory]: the captain's AgentMail inbox address and key handling live in firstmate's memory, not in this tracked file.
