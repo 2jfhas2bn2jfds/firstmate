@@ -12,12 +12,12 @@
 # graceful-skip paths - all hermetic over temp homes.
 #
 # The injection logic is computed once, before fm-brief.sh splits into its per-kind
-# arms, so the scout and secondmate arms exercise the identical shared logic on every
-# bash. The ship arm builds its definition-of-done with an apostrophe inside a
-# $(cat <<EOF) command substitution that bash 3.2 cannot parse (a pre-existing
-# limitation tracked separately); the ship sub-cases therefore run on bash 4+/CI and
-# are skipped cleanly on bash 3.2, where the scout/secondmate cases already prove the
-# behaviour.
+# arms, so every arm shares it. The ship sub-cases are guarded by a parse probe purely
+# as defence: the ship arm emits its definition-of-done with a direct heredoc rather
+# than one nested in a $(...) command substitution (which bash 3.2 mis-parses on an
+# apostrophe), so it parses on every supported bash and the probe normally passes; the
+# scout/secondmate cases would still prove the shared logic if some bash ever failed to
+# parse the ship arm.
 set -u
 
 # shellcheck source=tests/lib.sh
