@@ -28,6 +28,10 @@
 # Scout tasks ignore mode - their deliverable is a report, not a merge.
 # Ship tasks include a project-memory section so durable project-intrinsic
 # learnings can be committed to AGENTS.md through the project's delivery path.
+# Every generated brief (ship, scout, and the secondmate charter) also has the
+# captain's "## Engineering conventions" section from data/captain.md injected near
+# the top, so the conventions reach every crewmate at spawn; it is a graceful no-op
+# when captain.md or that section is absent.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -61,6 +65,34 @@ shell_quote() {
 
 STATUS_FILE=$(shell_quote "$STATE/$ID.status")
 
+# Source the captain's standing engineering conventions (e.g. no em dashes, no
+# agent co-author trailers, e2e-first testing) from this home's data/captain.md and
+# inject them near the top of every generated brief, so each crewmate and secondmate
+# sees them the moment it spawns. The conventions are captain-specific, so they are
+# pulled at generation time (never hardcoded here) and stay in sync with captain.md.
+# The section runs from a heading beginning "## Engineering conventions" until the
+# next level-1/2 heading. If captain.md is missing or has no such section, nothing is
+# injected and brief generation is otherwise unchanged.
+captain_conventions_body() {
+  local captain="$DATA/captain.md"
+  [ -f "$captain" ] || return 0
+  awk '
+    /^## Engineering conventions/ { if (!started) { started = 1; next } }
+    started && (/^# / || /^## /) { exit }
+    started { if (NF || seen) { seen = 1; print } }
+  ' "$captain"
+}
+CONV_BODY=$(captain_conventions_body)
+CONVENTIONS_BLOCK=""
+if [ -n "$CONV_BODY" ]; then
+  CONVENTIONS_BLOCK="
+# Engineering conventions (follow these)
+The captain's standing engineering conventions apply to all your work on this task: code, commits, PRs, briefs, and content. Follow them exactly.
+
+$CONV_BODY
+"
+fi
+
 if [ "$KIND" = secondmate ]; then
 SECONDMATE_PROJECTS=""
 idx=1
@@ -74,7 +106,7 @@ SECONDMATE_SCOPE=${FM_SECONDMATE_SCOPE:-${FM_SECONDMATE_CHARTER:-"{TASK}"}}
 PROJECT_LIST=$(printf '%s\n' "$SECONDMATE_PROJECTS" | tr ' ' '\n' | sed 's/^/- /')
 cat > "$BRIEF" <<EOF
 You are a secondmate: a persistent domain supervisor managed by the main firstmate. Work on your own; do not wait for a human.
-
+${CONVENTIONS_BLOCK}
 # Charter
 $SECONDMATE_CHARTER
 
@@ -131,7 +163,7 @@ REPO=${POS[1]}
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
-
+${CONVENTIONS_BLOCK}
 # Task
 {TASK}
 
@@ -224,7 +256,7 @@ esac
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
-
+${CONVENTIONS_BLOCK}
 # Task
 {TASK}
 
