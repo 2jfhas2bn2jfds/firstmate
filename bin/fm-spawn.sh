@@ -348,12 +348,17 @@ fi
 
 W="fm-$ID"
 T="$SES:$W"
-if tmux list-windows -t "$SES" -F '#{window_name}' | grep -qx "$W"; then
+if tmux list-windows -t "$SES:" -F '#{window_name}' | grep -qx "$W"; then
   echo "error: window $T already exists" >&2
   exit 1
 fi
 
-tmux new-window -d -t "$SES" -n "$W" -c "$PROJ_ABS"
+# Target the session with a trailing colon ("$SES:") so tmux places the new window at
+# the session's next free index (honouring base-index). A bare "$SES" is parsed as a
+# target-window, so a numeric or auto-named session (the common in-tmux case where
+# '#S' is "0") would be read as window index 0 and fail with "index 0 in use" or land
+# in the wrong session - the failure under non-default tmux config this guards against.
+tmux new-window -d -t "$SES:" -n "$W" -c "$PROJ_ABS"
 if [ "$KIND" != secondmate ]; then
   tmux send-keys -t "$T" 'treehouse get' Enter
 
