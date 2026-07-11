@@ -45,18 +45,61 @@ batched digest rather than per-wake injections.
 No `/back` is needed. The first genuine message is the return signal:
 
 - A message **without** the sentinel marker and **not** starting with `/afk`
-  -> the captain is back. Clear `state/.afk`, stop the daemon, flush one
-  distilled "while you were out" catch-up (drain `state/.wake-queue`, summarize
-  any pending escalations from `state/.subsuper-escalations` and any
+  -> the captain is back. Clear `state/.afk`, flush one distilled "while you
+  were out" catch-up (drain `state/.wake-queue`, summarize any pending
+  escalations from `state/.subsuper-escalations` and any
   `state/.subsuper-inject-wedged` marker), and resume full per-wake
-  responsiveness (arm `bin/fm-watch-arm.sh`).
-- A message **with** the sentinel marker (`FM_INJECT_MARK`, ASCII 0x1f) -> it
-  is a daemon escalation; stay afk and process it.
+  responsiveness (arm `bin/fm-watch-arm.sh`). You do **not** need to stop the
+  daemon: it is always-on and transitions to its minimal present-mode liveness
+  layer on its own once the flag is gone (relinquishing its watcher child so your
+  re-armed watcher takes over). Stopping it is optional.
+- A message **with** the sentinel marker (`FM_INJECT_MARK`, ASCII 0x1f) while
+  afk is active -> it is a daemon escalation; stay afk and process it. (While
+  afk is OFF the same marker is a liveness poke, not an escalation: drain
+  `state/.wake-queue` and re-arm the watcher; see "Always-on operation" below.)
 - Re-invoking `/afk` while already away -> stay afk (refresh the flag); this
   does **not** trigger an exit.
 
 Bias ambiguous cases toward exit: a present captain beats token savings, and
 a false exit is self-correcting (the captain re-runs `/afk`).
+
+## Always-on operation
+
+`bin/fm-supervise-daemon.sh` is one detached, home-scoped, singleton process that
+runs in **two modes**, chosen per loop iteration by whether `state/.afk` exists:
+
+- **Away mode (`state/.afk` present)** - the away-mode sub-supervisor described in
+  this skill, **unchanged**: it owns the watcher as a child, classifies each wake,
+  self-handles the routine majority, and injects batched escalations while the
+  flag exists.
+- **Present mode (`state/.afk` absent)** - a **minimal liveness layer** only. It
+  does NOT classify, batch, absorb, or escalate (the always-on `fm-watch.sh`
+  triage owns that). It only: (1) re-arms the home-scoped watcher via
+  `bin/fm-watch-arm.sh` when the liveness beacon (`state/.last-watcher-beat`) goes
+  stale beyond `FM_GUARD_GRACE` with work in flight - the backstop for a
+  harness-reaped watcher-arm task; and (2) when actionable wakes have sat in
+  `state/.wake-queue` past `FM_POKE_AFTER_SECS` (default 120s) with no active turn,
+  injects **one** marker-prefixed, single-line **liveness poke** telling firstmate
+  to drain the queue and re-arm. The poke reuses the same injection hardening as an
+  escalation (sentinel marker, busy/pending composer guards, verified type-once
+  submit) so a captain mid-turn never sees it; it is deduped to one poke per
+  stranded queue state and hard-capped to one per `FM_POKE_MIN_INTERVAL`
+  (default 600s).
+
+A marker-prefixed message is therefore an **escalation** when afk is active and a
+**liveness poke** when afk is off; both are internal (never captain text). On a
+poke, drain `state/.wake-queue` with `bin/fm-wake-drain.sh`, handle each wake, and
+re-arm the watcher.
+
+Independently of mode, on every poll the daemon runs a **secondmate dead-turn
+probe**: for each `kind=secondmate` meta whose pane is idle but shows a harness
+error signature (`FM_SECONDMATE_DEADTURN_RE`, default `API Error|ConnectionRefused`)
+in its recent tail, it enqueues one durable recovery wake (deduped one-per-incident
+on the error line). This surfaces a secondmate whose turn died silently - which
+writes no status and which the watcher structurally exempts from stale detection -
+so it no longer strands for hours. Present mode surfaces it via the poke; away mode
+on the next drain. This is enqueue-only and does not alter afk's classification or
+injection.
 
 ## Orthogonal to approval authority
 
