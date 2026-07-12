@@ -74,6 +74,7 @@ WT=$(meta_value worktree)
 WIN=$(meta_value window)
 KIND=$(meta_value kind)
 [ -n "$KIND" ] || KIND=ship
+HARNESS=$(meta_value harness)
 
 # A torn-down (or never-created) worktree has no current state to read.
 if [ -z "$WT" ] || [ ! -d "$WT" ]; then
@@ -353,8 +354,16 @@ pane_readable "$WIN" || emit unknown none "window gone: $WIN"
 
 # Secondmates idle on their own watcher (idle pane = healthy), so the busy
 # signature is not meaningful for them; read their state from the status log only.
-if [ "$KIND" != secondmate ] && fm_pane_is_busy "$WIN"; then
-  emit working pane "harness busy"
+if [ "$KIND" != secondmate ]; then
+  if fm_pane_is_busy "$WIN"; then
+    emit working pane "harness busy"
+  # A claude crew that ended its turn but is idle-waiting on its OWN running
+  # background shell (a pipeline, an RN build) shows no busy spinner, only a
+  # background-shell footer. That footer means it is still working, so treat it
+  # as busy too. Gated on harness=claude because the footer form is claude's.
+  elif [ "$HARNESS" = claude ] && fm_pane_has_bg_shell "$WIN"; then
+    emit working pane "background shell running"
+  fi
 fi
 
 if [ -n "$LOG_VERB" ]; then

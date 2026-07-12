@@ -38,6 +38,25 @@
 # interrupt"; opencode: "esc interrupt"; pi: "Working...".
 FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.'
 
+# Claude background-shell footer: a SECOND claude busy signature (verified live
+# 2026-07-12). When a claude crew ends its turn but is idle-WAITING on its own
+# running background shell (a no-mistakes pipeline, a long RN build, a test run),
+# the pane shows NO "esc to interrupt" spinner - the turn is over - only a footer
+# segment naming the still-running shell(s). Two live forms observed:
+#   "✻ Cooked for 1m 4s · 1 shell still running"
+#   "⏵⏵ bypass permissions on · 1 shell · ← for agents"
+# plus the original report's "N shell(s) still running" during long RN builds.
+# This footer means the crew IS working, so recognizing it stops the watcher's
+# false stale/wedge wakes on a healthy crew during long validations. It is
+# claude-specific, so callers gate it on harness=claude (fm-crew-state.sh reads
+# harness= from meta). The match is anchored two independent ways so ordinary
+# transcript prose that merely mentions a shell never counts: it is scoped to the
+# footer tail (last few non-blank lines, exactly like fm_pane_is_busy) AND each
+# alternative carries its own anchor - the distinctive footer middle-dot "·"
+# separator immediately before "<N> shell", or the full "<N> shell(s) still
+# running" phrase. FM_BG_SHELL_REGEX overrides the set.
+FM_TMUX_BG_SHELL_REGEX_DEFAULT='[0-9]+[[:space:]]+shells?[[:space:]]+still[[:space:]]+running|·[[:space:]]*[0-9]+[[:space:]]+shells?([[:space:]]|$)'
+
 # fm_tmux_strip_ghost: remove dim/faint (ANSI SGR 2) styled runs from one captured
 # composer line, then drop any remaining escape sequences, leaving only the plain,
 # normal-intensity text, the text a human actually typed. Dim/faint runs are
@@ -161,6 +180,19 @@ fm_pane_is_busy() {  # <target>
   tail40=$(tmux capture-pane -p -t "$win" -S -40 2>/dev/null) || return 1
   printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 \
     | grep -qiE "${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}"
+}
+
+# fm_pane_has_bg_shell: 0 if the pane's footer shows a running background shell
+# (the claude idle-but-working signature described at FM_TMUX_BG_SHELL_REGEX_DEFAULT
+# above). Scans the same last-few-non-blank-lines footer tail as fm_pane_is_busy,
+# so the match cannot be tripped by shell talk buried in the transcript body.
+# Claude-specific: the caller (fm-crew-state.sh) consults this only for a
+# harness=claude target; the function itself stays a pure text test.
+fm_pane_has_bg_shell() {  # <target>
+  local win=$1 tail40
+  tail40=$(tmux capture-pane -p -t "$win" -S -40 2>/dev/null) || return 1
+  printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 \
+    | grep -qiE "${FM_BG_SHELL_REGEX:-$FM_TMUX_BG_SHELL_REGEX_DEFAULT}"
 }
 
 # fm_tmux_submit_core: type <text> into <target> ONCE, then submit with Enter,
