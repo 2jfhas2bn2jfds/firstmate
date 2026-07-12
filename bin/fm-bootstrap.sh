@@ -391,7 +391,7 @@ git_author_ensure() {
   # config/git-author, so firstmate's own commits (and any firstmate-on-itself
   # crew whose worktree inherits the primary's shared config) carry the captain's
   # GitHub identity, not the machine default. Silent when already set or the file
-  # is absent; leaves an explicitly-different identity untouched and reports it.
+  # is absent; an explicitly-different identity field is left untouched and reported.
   fm_git_author_apply "$FM_ROOT" "$CONFIG/git-author" report
 }
 

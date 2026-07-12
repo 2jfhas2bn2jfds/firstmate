@@ -24,6 +24,17 @@
 # single stderr warning and is otherwise a no-op. Blank and '#'-comment lines are
 # ignored; a surrounding-whitespace and trailing-CR trim keeps a hand-edited or
 # CRLF file working.
+#
+# Known limitation: git config --local from a treehouse worktree writes the
+# pooled clone's shared common config, so the first apply into a project pool
+# bakes the identity in for every checkout of that project. A later edit to
+# config/git-author is not automatically pushed into already-touched pools: the
+# now-different pool identity is treated as a conflict, reported to stderr on
+# the spawn and bootstrap paths (never silently), and reconciled manually with
+# git config --local in that pool when the edit was intentional. Blind
+# auto-propagation would be unsafe: secondmate homes and firstmate-on-itself
+# worktrees share the firstmate repo's config, and an explicitly-set identity
+# there is exactly what the conflict-preserve rule exists to protect.
 
 # fm_git_author_warn <config-file>: emit at most one malformed-config warning per
 # process, so a script that calls apply in a loop never spams stderr.
@@ -42,6 +53,7 @@ fm_git_author_values() {
   [ -f "$cfg" ] || return 1
   while IFS= read -r line || [ -n "$line" ]; do
     line=${line%$'\r'}
+    line=${line#"${line%%[![:space:]]*}"}; line=${line%"${line##*[![:space:]]}"}
     case "$line" in
       '#'*|'') continue ;;
       name=*) name=${line#name=} ;;
@@ -59,36 +71,43 @@ fm_git_author_values() {
 }
 
 # fm_git_author_apply <target-dir> <config-file> [report-conflict]: set repo-local
-# user.name/user.email in the git repo at <target-dir> from <config-file>, but
-# only when the repo has no repo-local identity yet or already matches. An
-# explicitly-different repo-local identity is left untouched; with a truthy third
-# argument the conflict is reported to stderr, otherwise it is left silently.
-# Never writes global or system config. Always returns 0 - identity is advisory,
-# so a missing file or a conflict must never fail the caller.
+# user.name/user.email in the git repo at <target-dir> from <config-file>, per
+# field: user.name and user.email are handled independently, and each is set when
+# its repo-local value is unset or already equals the config value. Only a field
+# holding a genuinely-different value is a conflict: that field is left
+# untouched, and with a truthy third argument the conflict is reported to
+# stderr, otherwise it is left silently. Per-field handling self-heals a partial
+# identity (one field set, the other unset, e.g. after an earlier apply whose
+# second write failed under .git/config.lock contention) without ever clobbering
+# an explicitly-different value. Never writes global or system config. Always
+# returns 0 - identity is advisory, so a missing file or a conflict must never
+# fail the caller.
 #
 # In a linked git worktree, repo-local config resolves to the shared common
 # config, so a fresh crew worktree starts unset and this sets the captain identity
 # for its commits; a firstmate-on-itself worktree already inheriting the primary's
 # identity matches and is a no-op.
 fm_git_author_apply() {
-  local dir=$1 cfg=$2 report=${3:-} vals name email cur_name cur_email
+  local dir=$1 cfg=$2 report=${3:-} vals name email cur_name cur_email conflicts=''
   vals=$(fm_git_author_values "$cfg") || return 0
   name=${vals%%$'\t'*}
   email=${vals#*$'\t'}
   git -C "$dir" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
   cur_name=$(git -C "$dir" config --local user.name 2>/dev/null || true)
   cur_email=$(git -C "$dir" config --local user.email 2>/dev/null || true)
-  if [ -z "$cur_name" ] && [ -z "$cur_email" ]; then
-    git -C "$dir" config --local user.name "$name" || return 0
-    git -C "$dir" config --local user.email "$email" || return 0
-    return 0
+  if [ -z "$cur_name" ]; then
+    git -C "$dir" config --local user.name "$name" 2>/dev/null || true
+  elif [ "$cur_name" != "$name" ]; then
+    conflicts="user.name \"$cur_name\""
   fi
-  if [ "$cur_name" = "$name" ] && [ "$cur_email" = "$email" ]; then
-    return 0
+  if [ -z "$cur_email" ]; then
+    git -C "$dir" config --local user.email "$email" 2>/dev/null || true
+  elif [ "$cur_email" != "$email" ]; then
+    conflicts="${conflicts:+$conflicts, }user.email \"$cur_email\""
   fi
-  if [ -n "$report" ]; then
-    printf 'warning: %s keeps a different repo-local git identity (%s <%s>); leaving it unchanged\n' \
-      "$dir" "${cur_name:-unset}" "${cur_email:-unset}" >&2
+  if [ -n "$conflicts" ] && [ -n "$report" ]; then
+    printf 'warning: %s keeps a different repo-local git identity (%s); leaving it unchanged\n' \
+      "$dir" "$conflicts" >&2
   fi
   return 0
 }

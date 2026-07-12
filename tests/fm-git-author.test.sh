@@ -8,12 +8,15 @@
 # GitHub identity from the gitignored config/git-author file and sets it repo-local
 # in every worktree/home fm-spawn launches into, plus the firstmate primary in
 # bootstrap. The guarantees under test:
-#   - the config parser trims whitespace/CRLF, ignores blanks and comments, and
-#     rejects a missing or '@'-less value as malformed (one stderr warning);
+#   - the config parser trims whitespace/CRLF (including an indented key), ignores
+#     blanks and comments, and rejects a missing or '@'-less value as malformed
+#     (one stderr warning);
 #   - apply sets a fresh repo's repo-local identity, is idempotent when it already
-#     matches, is a silent no-op when the file is absent, and never clobbers an
-#     explicitly-different repo-local identity (reporting only when asked);
-#   - fm-spawn sets the identity in the isolated worktree it launches into;
+#     matches, is a silent no-op when the file is absent, works per field (a
+#     partial identity completes its unset field), and never clobbers an
+#     explicitly-different field (reporting only when asked);
+#   - fm-spawn sets the identity in the isolated worktree it launches into, and
+#     reports a conflicting pool identity instead of skipping silently;
 #   - fm-bootstrap sets the primary's identity, and skips-with-a-report on a
 #     conflicting primary identity.
 # All hermetic over temp git repos and fakebins; never touches global git config.
@@ -58,15 +61,16 @@ test_values_parse() {
   local cfg out name email
   cfg="$TMP_ROOT/parse.cfg"
   mkdir -p "$TMP_ROOT"
-  # Surrounding whitespace, a trailing CR, a comment and a blank line, out of order.
-  printf '# captain identity\r\n\nemail=  %s \r\nname=\t%s  \n' "$CAP_EMAIL" "$CAP_NAME" > "$cfg"
+  # Surrounding whitespace, a trailing CR, a comment, a blank line, an indented
+  # key, out of order.
+  printf '# captain identity\r\n\n  email=  %s \r\nname=\t%s  \n' "$CAP_EMAIL" "$CAP_NAME" > "$cfg"
 
   out=$(fm_git_author_values "$cfg") || fail "values returned non-zero on a valid config"
   name=${out%%$'\t'*}
   email=${out#*$'\t'}
   [ "$name" = "$CAP_NAME" ] || fail "parsed name '$name' != '$CAP_NAME' (trim/comment/order handling)"
   [ "$email" = "$CAP_EMAIL" ] || fail "parsed email '$email' != '$CAP_EMAIL'"
-  pass "T1 parser trims whitespace/CR, ignores blanks and comments, tolerates key order"
+  pass "T1 parser trims whitespace/CR (indented keys too), ignores blanks and comments, tolerates key order"
 }
 
 # --- T2: apply sets a fresh repo's repo-local identity from the config --------
@@ -134,6 +138,34 @@ test_apply_preserves_conflict() {
   [ -z "$out" ] || fail "conflict must be silent without the report flag, got: $out"
   [ "$(local_name "$repo")" = 'Someone Else' ] || fail "silent path clobbered the identity"
   pass "T5 apply leaves an explicitly-different identity untouched (reports only when asked)"
+}
+
+# --- T5b: a partial identity self-heals per field ------------------------------
+test_apply_per_field_self_heal() {
+  local repo cfg out
+  cfg="$TMP_ROOT/partial.cfg"
+  write_author_config "$cfg"
+
+  # Matching partial state (one field already ours, the other unset, e.g. an
+  # earlier apply interrupted between its two writes): completes silently.
+  repo=$(make_repo "$TMP_ROOT/partial-match")
+  git -C "$repo" config --local user.name "$CAP_NAME"
+  out=$(fm_git_author_apply "$repo" "$cfg" report 2>&1) \
+    || fail "apply returned non-zero on a matching partial state"
+  [ -z "$out" ] || fail "matching partial state must complete silently, got: $out"
+  [ "$(local_email "$repo")" = "$CAP_EMAIL" ] || fail "unset user.email was not completed"
+  [ "$(local_name "$repo")" = "$CAP_NAME" ] || fail "matching user.name changed"
+
+  # Differing partial state: the unset field is completed, the different field
+  # is preserved and reported.
+  repo=$(make_repo "$TMP_ROOT/partial-diff")
+  git -C "$repo" config --local user.name 'Someone Else'
+  out=$(fm_git_author_apply "$repo" "$cfg" report 2>&1) \
+    || fail "apply returned non-zero on a differing partial state"
+  assert_contains "$out" "different repo-local git identity" "the differing field was not reported"
+  [ "$(local_name "$repo")" = 'Someone Else' ] || fail "differing user.name was clobbered"
+  [ "$(local_email "$repo")" = "$CAP_EMAIL" ] || fail "unset user.email was not completed alongside the preserved name"
+  pass "T5b apply self-heals a partial identity per field, preserving a differing field"
 }
 
 # --- T6: a malformed config warns once and sets nothing ----------------------
@@ -206,6 +238,40 @@ test_spawn_sets_worktree_identity() {
   [ "$(local_name "$wt")" = "$CAP_NAME" ] || fail "spawn did not set the worktree user.name"
   [ "$(local_email "$wt")" = "$CAP_EMAIL" ] || fail "spawn did not set the worktree user.email"
   pass "T7 fm-spawn sets the isolated worktree's repo-local identity from config/git-author"
+}
+
+# --- T7b: fm-spawn reports a conflicting pool identity, never silently ---------
+test_spawn_reports_conflict() {
+  local home proj wt cfg fakebin out
+  home="$TMP_ROOT/spawn-conf-home"
+  mkdir -p "$home/data"
+  proj=$(make_repo "$TMP_ROOT/spawn-conf-proj")
+  git -C "$proj" worktree add -q --detach "$TMP_ROOT/spawn-conf-wt" >/dev/null 2>&1
+  wt="$TMP_ROOT/spawn-conf-wt"
+  # The pool's shared config already carries a different identity (e.g. set from
+  # an earlier config/git-author before the captain edited it).
+  git -C "$wt" config --local user.name 'Pool Author'
+  git -C "$wt" config --local user.email 'pool@example.invalid'
+  cfg="$home/config/git-author"
+  write_author_config "$cfg"
+  fakebin=$(make_spawn_fakebin "$TMP_ROOT/spawn-conf-fake")
+
+  mkdir -p "$home/data/set-id-b2"
+  printf 'brief\n' > "$home/data/set-id-b2/brief.md"
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
+    PATH="$fakebin:$BASE_PATH" \
+    "$ROOT/bin/fm-spawn.sh" set-id-b2 "$proj" codex 2>&1) \
+    || fail "spawn failed: $out"
+
+  assert_contains "$out" "spawned set-id-b2" "spawn did not report success"
+  assert_contains "$out" "different repo-local git identity" \
+    "spawn did not report the conflicting pool identity"
+  [ "$(local_name "$wt")" = 'Pool Author' ] || fail "spawn clobbered the pool's user.name"
+  [ "$(local_email "$wt")" = 'pool@example.invalid' ] || fail "spawn clobbered the pool's user.email"
+  pass "T7b fm-spawn reports a conflicting pool identity instead of skipping silently"
 }
 
 # --- bootstrap integration: a fake toolchain so bootstrap runs clean ----------
@@ -286,8 +352,10 @@ test_apply_sets_fresh
 test_apply_absent_noop
 test_apply_idempotent
 test_apply_preserves_conflict
+test_apply_per_field_self_heal
 test_malformed_warns_once
 test_spawn_sets_worktree_identity
+test_spawn_reports_conflict
 test_bootstrap_sets_primary
 test_bootstrap_skips_on_conflict
 
