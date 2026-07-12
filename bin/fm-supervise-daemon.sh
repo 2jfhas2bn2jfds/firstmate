@@ -1,23 +1,34 @@
 #!/usr/bin/env bash
-# fm-supervise-daemon.sh — presence-gated sub-supervisor (closes #27's P2).
+# fm-supervise-daemon.sh - always-on liveness daemon + away-mode sub-supervisor.
 #
-# Wraps bin/fm-watch.sh: runs it as a child, classifies each wake reason, and
-# either SELF-HANDLES the routine majority in bash (no firstmate turn) or
-# ESCALATES a batched, distilled digest to the supervisor pane on
-# captain-relevant events only. This is the token-efficient replacement for the
-# prior always-inject daemon: routine signal/stale/heartbeat wakes cost zero
+# This one detached, home-scoped, singleton daemon runs in TWO modes, chosen per
+# loop iteration by the presence of the durable away-mode flag state/.afk:
+#
+# AWAY MODE (state/.afk present) - the away-mode sub-supervisor (closes #27's P2),
+# UNCHANGED. It wraps bin/fm-watch.sh: runs it as a child, classifies each wake
+# reason, and either SELF-HANDLES the routine majority in bash (no firstmate turn)
+# or ESCALATES a batched, distilled digest to the supervisor pane on
+# captain-relevant events only. Routine signal/stale/heartbeat wakes cost zero
 # firstmate context; only done/needs-decision/blocked/failed/persistent-wedge/
 # check-output events reach the LLM, and even then as one pre-read digest per
-# batch window.
-#
-# PRESENCE-GATING (the /afk contract). The daemon is the away-mode engine: it
-# injects ONLY when the durable away-mode flag state/.afk is present. Invoking
-# the /afk skill sets that flag and starts this daemon; any real (unmarked)
-# user message clears it and firstmate resumes full responsiveness.
-# When afk is off, normal fm-watch.sh always-on triage is the active mechanism.
-# Any buffered daemon escalations that remain while afk is off survive in
-# state/.subsuper-escalations and are flushed on the next "while you were out"
+# batch window. Injection is presence-gated: escalations inject ONLY while
+# state/.afk exists. Any buffered escalations that remain while afk is off survive
+# in state/.subsuper-escalations and flush on the next "while you were out"
 # catch-up or when afk is re-entered.
+#
+# PRESENT MODE (state/.afk absent) - a MINIMAL always-on liveness layer. It does
+# NOT own the watcher, classify, batch, or absorb wakes: the always-on triage in
+# bin/fm-watch.sh owns that. It only closes the two single-points-of-failure that
+# a firstmate-armed watcher alone cannot:
+#   (2) Watcher-liveness backstop: if state/.last-watcher-beat goes stale beyond
+#       FM_GUARD_GRACE while a task is in flight (the harness reaped firstmate's
+#       watcher-arm task), re-arm the home-scoped watcher via fm-watch-arm.sh.
+#   (3) Stranded-wake session poke: when actionable wakes sit in state/.wake-queue
+#       older than FM_POKE_AFTER_SECS with no active turn, inject ONE marked
+#       one-line poke telling firstmate to drain the queue and re-arm. This is
+#       what re-invokes the LLM when the harness dropped the arm's wake exit.
+# Behavior (4), the secondmate dead-turn probe, runs in BOTH modes (enqueue-only,
+# so it is additive to afk). See the "always-on liveness layer" section below.
 #
 # IN-BAND SENTINEL MARKER. Every daemon injection is prefixed with
 # FM_INJECT_MARK (ASCII unit separator, 0x1f) — a byte a human would never type
@@ -54,8 +65,9 @@
 # escalations before exit.
 #
 # Usage: fm-supervise-daemon.sh
-#          Long-lived background loop. Normally started by the /afk skill, which
-#          sets state/.afk first. Env knobs:
+#          Long-lived background loop. Normally ensured at session start by
+#          fm-bootstrap.sh, and also started by the /afk skill (which sets
+#          state/.afk first) or from the fm-guard.sh banner. Env knobs:
 #          FM_SUPERVISOR_TARGET     supervisor tmux target (override; otherwise
 #                                   auto-discovered from TMUX_PANE, then
 #                                   firstmate:0 fallback)
@@ -72,6 +84,26 @@
 #                                   (default 300)
 #          FM_HOUSEKEEPING_TICK     seconds between housekeeping passes while
 #                                   the watcher is mid-cycle (default 15)
+#          --- present-mode (always-on) liveness knobs ---
+#          FM_GUARD_GRACE           beacon-staleness threshold before the
+#                                   watcher-liveness backstop re-arms; the single
+#                                   liveness threshold shared with fm-guard.sh /
+#                                   fm-watch-arm.sh (default 300)
+#          FM_POKE_AFTER_SECS       seconds a wake may sit in state/.wake-queue
+#                                   before a session poke fires (default 120)
+#          FM_POKE_MIN_INTERVAL     hard cap between session pokes regardless of
+#                                   new wakes (default 600)
+#          FM_PRESENT_TICK          present-mode loop cadence (default 5)
+#          FM_BACKSTOP_ARM_THROTTLE min seconds between backstop arm launches
+#                                   (default 30)
+#          FM_SECONDMATE_DEADTURN_RE OR-ed harness dead-turn error signatures
+#                                   scanned in a secondmate pane's recent tail
+#                                   (default 'API Error|ConnectionRefused')
+#          FM_SECONDMATE_PROBE_TICK seconds between secondmate dead-turn probes
+#                                   (default = FM_HOUSEKEEPING_TICK)
+#          FM_WATCH_ARM_BIN         watcher-arm script the backstop launches
+#                                   (override for tests; default the sibling
+#                                   bin/fm-watch-arm.sh)
 #          FM_BUSY_REGEX            OR-ed busy signatures (mirrors fm-watch.sh)
 #          FM_COMPOSER_IDLE_RE      empty-composer regex applied after dim-ghost
 #                                   and structural border stripping (default:
@@ -142,6 +174,36 @@ CRASH_BACKOFF_DEFAULT=60
 CRASH_NORMAL_SLEEP_DEFAULT=5
 LOG_MAX_BYTES_DEFAULT=1048576
 LOG_KEEP_LINES_DEFAULT=2000
+
+# --- always-on (present-mode) liveness tunables -----------------------------
+# These drive the minimal liveness layer the daemon runs while afk is INACTIVE.
+# In present mode the daemon does NOT own the watcher or classify wakes (the
+# always-on triage in bin/fm-watch.sh owns that); it only (1) re-arms the
+# watcher when its liveness beacon goes stale with work in flight, (2) pokes the
+# firstmate session when actionable wakes sit stranded in the queue with no
+# active turn, and (3) probes secondmate panes for a dead-turn harness error.
+# Beacon staleness reuses FM_GUARD_GRACE, the single liveness threshold shared
+# with fm-guard.sh and fm-watch-arm.sh.
+GUARD_GRACE_DEFAULT=300
+# Seconds a wake may sit in state/.wake-queue before the daemon pokes the
+# session to drain it (present mode only).
+POKE_AFTER_SECS_DEFAULT=120
+# Hard cap: never poke more than once per this many seconds, regardless of new
+# wakes. Combined with the queue-signature dedupe (no re-poke of an unchanged
+# stranded queue), this keeps pokes rare and quiet.
+POKE_MIN_INTERVAL_DEFAULT=600
+# Present-mode loop cadence: how often the liveness jobs run while afk is off.
+PRESENT_TICK_DEFAULT=5
+# Minimum seconds between backstop watcher-arm launches, so a stale-beacon window
+# does not spawn a burst of arms before the first one beats.
+BACKSTOP_ARM_THROTTLE_DEFAULT=30
+# Harness dead-turn error signatures scanned in a secondmate pane's recent tail.
+# A shell variable so the pattern list can grow; overridable via the env var.
+SECONDMATE_DEADTURN_RE_DEFAULT='API Error|ConnectionRefused'
+
+# The watcher-arm script the present-mode backstop launches. Overridable so tests
+# can stub it; absent, it is the verified sibling script.
+FM_WATCH_ARM_BIN="${FM_WATCH_ARM_BIN:-$FM_DAEMON_DIR/fm-watch-arm.sh}"
 
 # --- presence-gating + sentinel marker --------------------------------------
 # The in-band sentinel: ASCII unit separator (0x1f). Invisible and untypable on
@@ -578,22 +640,24 @@ window_for_task() {  # <task-key>
 #     after dim/faint ghost text and borders are ignored (a human's half-typed
 #     line, or a previous injection's unsent text), defer entirely - injecting
 #     would merge with the human's text.
-inject_msg() {  # <message> [state]
-  local msg=$1 state target retries sleep_s verdict
-  state="${2:-$(_state_root)}"
-  # (1) Presence-gate: inject ONLY when afk is active. When afk is off, the
-  # daemon self-handles and stays quiet; firstmate drives the normal always-on
-  # watcher triage. Escalations buffer and survive for the next catch-up flush.
-  afk_active "$state" || { log "inject deferred: afk inactive"; return 1; }
-  # (2) Single-line digest: collapse any embedded newlines so submission via
+# _inject_marked: the SHARED marked-submit core, used by BOTH the afk escalation
+# path (inject_msg, which adds the presence-gate) and the present-mode session
+# poke (poke_session, which has no gate). Kept as one code path so the injection
+# hardening - marker, single-line collapse, busy/pending composer guards, and the
+# verified type-once-retry-Enter submit - cannot drift between the two callers.
+# Returns 0 only when the composer is confirmed EMPTY afterward (submit landed);
+# non-zero when the pane is gone, busy, holds pending input, or the submit could
+# not be confirmed. Never gates on afk: the caller owns that policy.
+_inject_marked() {  # <message> <target>
+  local msg=$1 target=$2 retries sleep_s verdict
+  # Single-line digest: collapse any embedded newlines so submission via
   # send-keys + Enter is unambiguous regardless of how the TUI composer treats
-  # them. Then prepend the sentinel marker — firstmate's afk-exit contract
-  # keys off its presence at the start of the message.
+  # them. Then prepend the sentinel marker - firstmate keys off its presence at
+  # the start of the message (afk escalation, or present-mode liveness poke).
   msg=$(_collapse_newlines "$msg")
   msg="${FM_INJECT_MARK}${msg}"
-  target="${FM_SUPERVISOR_TARGET:-$FM_SUPERVISOR_TARGET_DEFAULT}"
   tmux display-message -p -t "$target" '#{pane_id}' >/dev/null 2>&1 || return 1
-  # (3) Busy-guard: never inject into an in-use pane. Two checks:
+  # Busy-guard: never inject into an in-use pane. Two checks:
   #   a) pane_is_busy: the harness shows a busy footer (agent mid-turn).
   #   b) pane_input_pending: the cursor line has real unsubmitted text after
   #      dim/faint ghost text and borders are ignored (a human's half-typed line,
@@ -606,10 +670,10 @@ inject_msg() {  # <message> [state]
     log "inject deferred: supervisor pane has pending input (non-empty composer)"
     return 1
   fi
-  # (4) Type the digest ONCE, then submit with Enter (retry Enter only, never
-  # retype) via the shared submit primitive. Success = the composer is confirmed
-  # EMPTY afterward (the text was consumed). An unconfirmed/unknown pane does NOT
-  # count as delivered, so the buffer is preserved (strict) rather than cleared.
+  # Type the digest ONCE, then submit with Enter (retry Enter only, never retype)
+  # via the shared submit primitive. Success = the composer is confirmed EMPTY
+  # afterward (the text was consumed). An unconfirmed/unknown pane does NOT count
+  # as delivered.
   retries=${FM_INJECT_CONFIRM_RETRIES:-$INJECT_CONFIRM_RETRIES_DEFAULT}
   sleep_s=${FM_INJECT_CONFIRM_SLEEP:-$INJECT_CONFIRM_SLEEP_DEFAULT}
   verdict=$(fm_tmux_submit_core "$target" "$msg" "$retries" "$sleep_s" "$sleep_s")
@@ -618,6 +682,204 @@ inject_msg() {  # <message> [state]
   fi
   log "inject failed: submit unconfirmed after $retries retries (verdict=$verdict, text may be in composer)"
   return 1
+}
+
+inject_msg() {  # <message> [state]
+  local msg=$1 state target
+  state="${2:-$(_state_root)}"
+  # Presence-gate: escalations inject ONLY when afk is active. When afk is off,
+  # the daemon self-handles and stays quiet; firstmate drives the normal always-on
+  # watcher triage. Escalations buffer and survive for the next catch-up flush.
+  # (The present-mode liveness poke is a separate path, poke_session, and is NOT
+  # afk-gated - it is the whole point of the always-on layer.)
+  afk_active "$state" || { log "inject deferred: afk inactive"; return 1; }
+  target="${FM_SUPERVISOR_TARGET:-$FM_SUPERVISOR_TARGET_DEFAULT}"
+  _inject_marked "$msg" "$target"
+}
+
+# ============================================================================
+# ALWAYS-ON (present-mode) liveness layer. Everything below runs ONLY while afk
+# is INACTIVE. It is deliberately minimal: it does NOT classify, batch, or absorb
+# wakes (the always-on triage in bin/fm-watch.sh owns that). It only keeps the
+# watcher alive, re-invokes a stalled firstmate session, and surfaces a dead
+# secondmate turn the watcher structurally cannot see. All decisions take an
+# explicit <state> dir and use injectable binaries so they are unit-testable.
+# ============================================================================
+
+# Count in-flight tasks (a state/<id>.meta exists). Mirrors fm-guard.sh.
+_in_flight_count() {  # <state>
+  local state=$1 meta n=0
+  for meta in "$state"/*.meta; do
+    [ -e "$meta" ] || continue
+    n=$((n + 1))
+  done
+  printf '%s' "$n"
+}
+
+# --- (behavior 2) watcher-liveness backstop ---------------------------------
+# _backstop_should_arm: 0 if the daemon should (re-)arm the watcher now - some
+# task is in flight AND the watcher liveness beacon is missing or older than
+# FM_GUARD_GRACE. Pure read (no side effects), so it is directly testable.
+_backstop_should_arm() {  # <state>
+  local state=$1 age
+  [ "$(_in_flight_count "$state")" -gt 0 ] || return 1
+  age=$(_file_age "$state/.last-watcher-beat")
+  [ "$age" -ge "${FM_GUARD_GRACE:-$GUARD_GRACE_DEFAULT}" ]
+}
+
+# ensure_watcher_backstop: when _backstop_should_arm says so (throttled to one
+# launch per BACKSTOP_ARM_THROTTLE so a stale window does not spawn a burst),
+# launch fm-watch-arm.sh DETACHED. The arm blocks on its watcher child, so it is
+# double-forked ( ... & ) inside a subshell that exits immediately: the arm is
+# reparented away from the daemon (no zombie, never waited on) and re-establishes
+# a watcher that beats the beacon and enqueues future wakes. Home-scoped
+# (FM_STATE_OVERRIDE), never a broad pkill. The subshell first sources this
+# home's X-mode/email-mode cadence configs when present, exactly as AGENTS.md
+# sections 14 and 15 require of an arm caller, so the re-armed watcher keeps the
+# opted-in FM_CHECK_INTERVAL (30s/60s) instead of degrading to the 300s default;
+# the sourcing is scoped to the arm launch, never the daemon itself. The
+# stranded-wake poke, not this, re-invokes the LLM; this only keeps the enqueue
+# machinery and beacon alive.
+ensure_watcher_backstop() {  # <state>
+  local state=$1 age throttle
+  _backstop_should_arm "$state" || return 0
+  throttle=$(_file_age "$state/.subsuper-last-backstop-arm")
+  [ "$throttle" -ge "${FM_BACKSTOP_ARM_THROTTLE:-$BACKSTOP_ARM_THROTTLE_DEFAULT}" ] || return 0
+  _now > "$state/.subsuper-last-backstop-arm"
+  age=$(_file_age "$state/.last-watcher-beat")
+  log "watcher beacon stale ${age}s with $(_in_flight_count "$state") in flight; launching backstop re-arm"
+  (
+    # shellcheck disable=SC1090,SC1091
+    [ -f "$FM_HOME/config/x-mode.env" ] && . "$FM_HOME/config/x-mode.env"
+    # shellcheck disable=SC1090,SC1091
+    [ -f "$FM_HOME/config/email-mode.env" ] && . "$FM_HOME/config/email-mode.env"
+    FM_STATE_OVERRIDE="$state" "$FM_WATCH_ARM_BIN" >/dev/null 2>&1 &
+  )
+}
+
+# --- (behavior 3) stranded-wake session poke --------------------------------
+# The durable wake queue path for a given state dir.
+_wake_queue_path() { printf '%s' "$1/.wake-queue"; }
+
+# Age (seconds) of the OLDEST queued wake, or -1 when the queue is empty/missing.
+# The queue is append-ordered "epoch<TAB>seq<TAB>...", so the first line's epoch
+# is the oldest pending wake.
+_poke_oldest_age() {  # <state>
+  local state=$1 queue first epoch
+  queue=$(_wake_queue_path "$state")
+  [ -s "$queue" ] || { printf '%s' -1; return; }
+  first=$(head -1 "$queue" 2>/dev/null)
+  epoch=${first%%$'\t'*}
+  case "$epoch" in ''|*[!0-9]*) printf '%s' -1; return ;; esac
+  printf '%s' "$(( $(_now) - epoch ))"
+}
+
+# Signature of the current queue content. Changes when a wake is added or the
+# queue drains, which is exactly the "queue drained or a new wake arrived"
+# condition that re-permits a poke.
+_poke_queue_sig() {  # <state>
+  local state=$1 queue
+  queue=$(_wake_queue_path "$state")
+  [ -s "$queue" ] || { printf ''; return; }
+  _hash_text "$(cat "$queue" 2>/dev/null)"
+}
+
+# poke_should_fire: 0 if a stranded-wake poke is warranted right now:
+#   - the oldest queued wake is at least FM_POKE_AFTER_SECS old, AND
+#   - at least FM_POKE_MIN_INTERVAL has passed since the last poke (hard cap), AND
+#   - the queue signature differs from the last poked one (dedupe: never re-poke
+#     the same stranded state - only a drain or a new wake re-permits a poke).
+# Pure read of state markers; the pane-busy guard is applied by _inject_marked at
+# send time (and re-checked in poke_session), so this stays a cheap decision.
+poke_should_fire() {  # <state>
+  local state=$1 age throttle sig last_sig
+  age=$(_poke_oldest_age "$state")
+  case "$age" in ''|*[!0-9-]*) return 1 ;; esac
+  [ "$age" -ge "${FM_POKE_AFTER_SECS:-$POKE_AFTER_SECS_DEFAULT}" ] || return 1
+  throttle=$(_file_age "$state/.subsuper-poke-sig")
+  [ "$throttle" -ge "${FM_POKE_MIN_INTERVAL:-$POKE_MIN_INTERVAL_DEFAULT}" ] || return 1
+  sig=$(_poke_queue_sig "$state")
+  last_sig=$(cat "$state/.subsuper-poke-sig" 2>/dev/null || true)
+  [ "$sig" != "$last_sig" ]
+}
+
+# poke_session: inject ONE marked, single-line poke into the firstmate session
+# telling it to drain the stranded queue and re-arm supervision. Marked (internal,
+# never captain-facing) and gated by poke_should_fire + the shared busy/pending
+# guards in _inject_marked, so a captain mid-turn never sees a poke and a stranded
+# state is poked at most once. Records the poked signature (its mtime is the
+# min-interval throttle) only on a confirmed submit, so a deferred/busy attempt is
+# retried on the next tick rather than silently marked done.
+poke_session() {  # <state>
+  local state=$1 target n msg
+  poke_should_fire "$state" || return 0
+  target="${FM_SUPERVISOR_TARGET:-$FM_SUPERVISOR_TARGET_DEFAULT}"
+  n=$(wc -l < "$(_wake_queue_path "$state")" 2>/dev/null | tr -d '[:space:]')
+  case "$n" in ''|*[!0-9]*) n=1 ;; esac
+  msg="Supervision liveness: ${n} wake(s) have sat unhandled in state/.wake-queue with no active turn. Drain them now (bin/fm-wake-drain.sh), handle each, then re-arm the watcher (bin/fm-watch-arm.sh)."
+  if _inject_marked "$msg" "$target"; then
+    _poke_queue_sig "$state" > "$state/.subsuper-poke-sig"
+    log "poke sent: ${n} stranded wake(s) in queue"
+  else
+    log "poke deferred: pane busy/pending or submit unconfirmed"
+  fi
+}
+
+# --- (behavior 4) secondmate dead-turn probe --------------------------------
+# Enqueue one durable wake via the production wake library, in a subshell scoped
+# to <state> so fm_wake_append targets the right queue and reuses its locking/seq
+# discipline (never reimplemented here). Mirrors tests/wake-helpers.sh append_wake.
+enqueue_liveness_wake() {  # <state> <kind> <key> <payload>
+  local state=$1 kind=$2 key=$3 payload=$4
+  # shellcheck source=bin/fm-wake-lib.sh
+  ( FM_STATE_OVERRIDE="$state" . "$FM_DAEMON_DIR/fm-wake-lib.sh"
+    fm_wake_append "$kind" "$key" "$payload" ) >/dev/null 2>&1
+}
+
+_meta_is_secondmate() { grep -q '^kind=secondmate$' "$1" 2>/dev/null; }
+_meta_window() { grep '^window=' "$1" 2>/dev/null | tail -1 | cut -d= -f2- ; }
+
+# secondmate_deadturn_probe: the watcher structurally exempts secondmate panes
+# from stale detection (an idle secondmate is normally healthy), so a secondmate
+# whose harness turn DIED on a transient API error writes no status and is never
+# surfaced. For each kind=secondmate meta this probe looks at the pane: a busy
+# pane is healthy (clear any marker); an idle pane whose recent tail shows a
+# harness error signature is a dead turn - enqueue a durable wake so the main
+# firstmate recovers it through the normal drain path (present mode surfaces it
+# via the poke; afk on the next drain). Deduped one-per-incident on the error
+# line, cleared when the pane recovers, so a persistent error does not re-enqueue.
+secondmate_deadturn_probe() {  # <state>
+  local state=$1 meta win id key marker tail40 errline re
+  re="${FM_SECONDMATE_DEADTURN_RE:-$SECONDMATE_DEADTURN_RE_DEFAULT}"
+  for meta in "$state"/*.meta; do
+    [ -e "$meta" ] || continue
+    _meta_is_secondmate "$meta" || continue
+    win=$(_meta_window "$meta")
+    [ -n "$win" ] || continue
+    id=$(basename "$meta"); id="${id%.meta}"
+    key=$(_stale_key "$id")
+    marker="$state/.subsuper-secondmate-deadturn-$key"
+    # A busy pane means the secondmate is mid-turn: healthy. Clear any marker.
+    if pane_is_busy "$win"; then
+      rm -f "$marker"
+      continue
+    fi
+    # Idle pane: a dead turn shows the harness error among the most-recent
+    # non-blank lines (a recovered secondmate would have output below it). Look at
+    # the last few lines only, mirroring fm_pane_is_busy's tail window.
+    tail40=$(tmux capture-pane -p -t "$win" -S -40 2>/dev/null) || continue
+    errline=$(printf '%s\n' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 \
+      | grep -iE "$re" | tail -1)
+    if [ -z "$errline" ]; then
+      rm -f "$marker"   # idle + no error = healthy resting secondmate
+      continue
+    fi
+    # Dead turn. Dedupe one-per-incident on the exact error line.
+    [ "$(cat "$marker" 2>/dev/null || true)" = "$errline" ] && continue
+    printf '%s' "$errline" > "$marker"
+    enqueue_liveness_wake "$state" stale "$win" "stale: $win (secondmate dead turn: $errline)"
+    log "secondmate dead-turn on $win: $errline; enqueued recovery wake"
+  done
 }
 
 # --- INJECT_SKIP prefix match (literal prefixes, no regex) ------------------
@@ -770,7 +1032,7 @@ fm_super_main() {
 
   local afk_status="off"
   afk_active "$STATE" && afk_status="on"
-  log "daemon starting (pid $$); target=$TARGET; target_source=$target_source; afk=$afk_status; inject_skip='${FM_INJECT_SKIP:-$INJECT_SKIP_DEFAULT}'; stale_escalate=${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}s; batch=${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}s"
+  log "daemon starting (pid $$); target=$TARGET; target_source=$target_source; afk=$afk_status; inject_skip='${FM_INJECT_SKIP:-$INJECT_SKIP_DEFAULT}'; stale_escalate=${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}s; batch=${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}s; always-on liveness: guard_grace=${FM_GUARD_GRACE:-$GUARD_GRACE_DEFAULT}s; poke_after=${FM_POKE_AFTER_SECS:-$POKE_AFTER_SECS_DEFAULT}s; poke_min_interval=${FM_POKE_MIN_INTERVAL:-$POKE_MIN_INTERVAL_DEFAULT}s"
 
   # --- shutdown: flush buffered escalations, reap child, release lock -------
   local WATCHER_PID="" CUR_TMP=""
@@ -817,8 +1079,47 @@ fm_super_main() {
     WATCHER_PID=$!
   }
 
-  local rc reason
+  local rc reason PRESENT_TICK
+  PRESENT_TICK=${FM_PRESENT_TICK:-$PRESENT_TICK_DEFAULT}
   while true; do
+    # --- secondmate dead-turn probe (BOTH modes, tick-gated) ---------------
+    # A dead secondmate turn writes no status and the watcher exempts secondmate
+    # panes from stale detection, so this cheap pane probe is the only thing that
+    # can surface it. It only enqueues a durable wake (no classification), so it
+    # is additive to afk behavior; present mode surfaces it via the poke below.
+    if [ "$(_file_age "$STATE/.subsuper-last-secondmate-probe")" -ge "${FM_SECONDMATE_PROBE_TICK:-${FM_HOUSEKEEPING_TICK:-$HOUSEKEEPING_TICK_DEFAULT}}" ]; then
+      _now > "$STATE/.subsuper-last-secondmate-probe"
+      secondmate_deadturn_probe "$STATE"
+    fi
+
+    # --- present mode (afk INACTIVE): minimal liveness layer ---------------
+    # The daemon does NOT own the watcher or classify wakes here - the always-on
+    # triage in bin/fm-watch.sh owns that. It only backstops watcher liveness and
+    # re-invokes a stalled session via a stranded-wake poke.
+    if ! afk_active "$STATE"; then
+      # Relinquish any watcher child owned during a prior afk stint, so the lock
+      # is released for firstmate's own (or the backstop's) absorb-mode watcher.
+      if [ -n "${WATCHER_PID:-}" ]; then
+        kill "$WATCHER_PID" 2>/dev/null || true
+        wait "$WATCHER_PID" 2>/dev/null || true
+        WATCHER_PID=""
+        if [ -n "${CUR_TMP:-}" ]; then
+          rm -f "$CUR_TMP" 2>/dev/null || true
+          CUR_TMP=""
+        fi
+        log "afk cleared: relinquished watcher child; entering present-mode liveness"
+      fi
+      ensure_watcher_backstop "$STATE"
+      poke_session "$STATE"
+      trim_log
+      sleep "$PRESENT_TICK"
+      continue
+    fi
+
+    # ======================================================================
+    # AFK MODE (afk ACTIVE): the daemon owns the watcher, classifies each wake,
+    # and injects batched escalations. Behavior below is unchanged.
+    # ======================================================================
     # --- pane-gone guard (preserved) ---------------------------------------
     # With the #29 watcher's enqueue-before-suppress, a wake is no longer
     # swallowed by running the watcher with no injection target. We still back

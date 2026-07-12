@@ -135,5 +135,53 @@ ROWS
   pass "bootstrap enforces no-mistakes minimum version"
 }
 
+# Bootstrap ensures the always-on liveness daemon: skipped outside tmux (the
+# daemon's supervisor-pane target cannot resolve there), started detached and
+# silently when inside tmux with no live pidfile, and left alone when the
+# pidfile names a live process. FM_ROOT_OVERRIDE points bootstrap's FM_ROOT at
+# the case home, so the fake daemon dropped in <home>/bin is what it launches.
+test_bootstrap_ensures_liveness_daemon() {
+  local case_dir home fakebin out pid i
+  case_dir="$TMP_ROOT/daemon-ensure"
+  home="$case_dir/home"
+  fm_git_init_commit "$home"
+  mkdir -p "$home/bin" "$home/state"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  cat > "$home/bin/fm-supervise-daemon.sh" <<SH
+#!/usr/bin/env bash
+echo started >> "$case_dir/daemon-started"
+echo \$\$ > "$home/state/.supervise-daemon.pid"
+exec sleep 60
+SH
+  chmod +x "$home/bin/fm-supervise-daemon.sh"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 TMUX='' "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "daemon ensure: expected silence outside tmux, got: $out"
+  [ -e "$case_dir/daemon-started" ] && fail "daemon ensure: started the daemon outside tmux"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 TMUX=/tmp/fake,0,0 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "daemon ensure: expected a silent start inside tmux, got: $out"
+  i=0
+  while [ "$i" -lt 50 ]; do
+    pid=$(cat "$home/state/.supervise-daemon.pid" 2>/dev/null || true)
+    [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && break
+    sleep 0.1; i=$((i + 1))
+  done
+  [ -s "$case_dir/daemon-started" ] || fail "daemon ensure: did not start the daemon inside tmux"
+  kill -0 "$pid" 2>/dev/null || fail "daemon ensure: started daemon is not alive behind its pidfile"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 TMUX=/tmp/fake,0,0 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "daemon ensure: expected silence with a live daemon, got: $out"
+  sleep 0.3
+  i=$(grep -c started "$case_dir/daemon-started" 2>/dev/null || echo 0)
+  kill "$pid" 2>/dev/null || true
+  [ "$i" = 1 ] || fail "daemon ensure: launched $i daemons (expected 1; a live pidfile must be left alone)"
+  pass "bootstrap ensures the liveness daemon: tmux-gated, silent, idempotent on a live pidfile"
+}
+
 test_bootstrap_reporting
 test_no_mistakes_min_version
+test_bootstrap_ensures_liveness_daemon
