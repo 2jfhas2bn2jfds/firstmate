@@ -39,6 +39,10 @@
 #          recovered and STUCK clone drift, and prunes gone local branches; it is
 #          bounded by FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT, default 20s.
 #          Set FM_FLEET_PRUNE=0 to skip branch pruning during that refresh.
+#          Bootstrap also ensures the always-on liveness daemon
+#          (bin/fm-supervise-daemon.sh) is running: silent, idempotent (a live
+#          pidfile is left alone), and skipped outside tmux where the daemon's
+#          supervisor-pane target cannot resolve.
 #        fm-bootstrap.sh install <tool>...
 #          Install the named tools (only ones the captain approved).
 set -u
@@ -380,6 +384,29 @@ EOF
   echo "FME: email mode on - notifier armed via state/email-watch.check.sh; 60s watcher cadence in config/email-mode.env"
 }
 
+# Always-on liveness daemon (session start): ensure this home's detached,
+# singleton fm-supervise-daemon.sh is running, so the watcher-liveness backstop
+# and stranded-wake poke exist from bootstrap onward instead of waiting for the
+# first /afk or guard banner. Idempotent: a pidfile naming a live process is
+# left alone (mirrors the /afk skill's liveness check; the daemon's own lock
+# no-ops a racing start). Skipped outside tmux, where the daemon's
+# supervisor-pane target cannot resolve and its startup validation would exit
+# it immediately. Silent: an ensure-start is not a problem line.
+liveness_daemon_ensure() {
+  local daemon pidfile pid
+  daemon="$FM_ROOT/bin/fm-supervise-daemon.sh"
+  [ -x "$daemon" ] || return 0
+  [ -n "${TMUX:-}" ] || return 0
+  pidfile="$STATE/.supervise-daemon.pid"
+  pid=$(cat "$pidfile" 2>/dev/null || true)
+  case "$pid" in
+    ''|*[!0-9]*) ;;
+    *) kill -0 "$pid" 2>/dev/null && return 0 ;;
+  esac
+  mkdir -p "$STATE" 2>/dev/null || return 0
+  ( FM_HOME="$FM_HOME" nohup "$daemon" >/dev/null 2>&1 & )
+}
+
 if [ "${1:-}" = "install" ]; then
   shift
   [ $# -gt 0 ] || { echo "usage: fm-bootstrap.sh install <tool>..." >&2; exit 1; }
@@ -418,4 +445,5 @@ secondmate_sync
 x_mode_setup
 email_mode_setup
 fleet_sync
+liveness_daemon_ensure
 exit 0

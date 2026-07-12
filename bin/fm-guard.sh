@@ -81,6 +81,16 @@ if [ -e "$BEAT" ]; then
   fi
 fi
 
+# The always-on liveness daemon is the durable backstop for a reaped watcher-arm:
+# when it is running it re-arms the watcher itself the moment the beacon goes
+# stale. Report whether it is alive so the banner can prompt starting it.
+daemon_pid=$(cat "$STATE/.supervise-daemon.pid" 2>/dev/null || true)
+daemon_alive=false
+case "$daemon_pid" in
+  ''|*[!0-9]*) ;;
+  *) kill -0 "$daemon_pid" 2>/dev/null && daemon_alive=true ;;
+esac
+
 # No fresh watcher with tasks in flight is the dangerous state: emit a prominent,
 # bordered banner FIRST so it reads as an alarm, not a buried stderr line.
 if [ "$watcher_fresh" = false ]; then
@@ -96,6 +106,13 @@ if [ "$watcher_fresh" = false ]; then
     printf '●  %s task(s) in flight, but no watcher has a fresh beacon (last beat: %s, grace %ss).\n' "$in_flight" "$beacon_desc" "$GRACE"
     printf '●  Trust bin/fm-watch-arm.sh for the true state: it confirms a live watcher and a fresh beacon, or fails loudly.\n'
     printf '●  %s\n' "$fix"
+    if [ "$daemon_alive" = false ]; then
+      printf "●  The always-on liveness daemon is NOT running - start it from firstmate's own tmux pane\n"
+      printf '●  (the daemon binds its poke target from that pane) so a reaped watcher-arm self-heals next time:\n'
+      printf '●      nohup bin/fm-supervise-daemon.sh >/dev/null 2>>state/.supervise-daemon.startup.err &\n'
+      printf '●  The backstop is armed only once state/.supervise-daemon.pid names a live process; if the\n'
+      printf '●  daemon exits instead, the reason is in state/.supervise-daemon.startup.err.\n'
+    fi
     printf '●%s\n' "$rule"
   } >&2
 fi

@@ -27,7 +27,10 @@ A pull-based guard (`bin/fm-guard.sh`) warns through supervision tool output if 
 The drain script calls that guard after emptying the queue, which avoids repeating the queued-wakes warning for records it just consumed while still warning on stale watcher liveness.
 It leads with prominent bordered banners for the tangle and no-watcher cases so they cannot be skimmed past.
 
-A presence-gated sub-supervisor (`bin/fm-supervise-daemon.sh`) extends this for walk-away supervision: the `/afk` skill activates it, after which the watcher reverts to daemon-managed one-shot mode and the daemon self-handles routine wakes in bash.
+An always-on liveness daemon (`bin/fm-supervise-daemon.sh`) runs alongside as one detached, home-scoped singleton with two modes; bootstrap ensures it is running at every session start (inside tmux), and the guard's no-watcher banner prompts a start if it is ever found dead.
+While `state/.afk` is absent it is a minimal present-mode liveness layer that does not classify, batch, or absorb wakes: it re-arms the home-scoped watcher when the liveness beacon goes stale beyond `FM_GUARD_GRACE` with work in flight, and injects one marker-prefixed liveness poke when actionable wakes sit in `state/.wake-queue` past `FM_POKE_AFTER_SECS` with no active turn.
+In both modes it also probes idle `kind=secondmate` panes for a dead-turn harness error signature (`FM_SECONDMATE_DEADTURN_RE`) and enqueues a durable recovery wake, since the watcher structurally exempts secondmate panes from stale detection.
+The `/afk` skill activates its away mode for walk-away supervision: while the flag exists the watcher reverts to daemon-managed one-shot mode and the daemon self-handles routine wakes in bash.
 The watcher and daemon share `bin/fm-classify-lib.sh` for captain-relevant status verbs and status-scan primitives.
 The always-on watcher also uses that library's provably-working predicate on no-verb signal and non-terminal-stale paths, while the daemon keeps its away-mode stale recheck unchanged.
 The daemon escalates only captain-relevant events as one batched, single-line digest (prefixed with an in-band sentinel marker so firstmate can tell daemon injections apart from real messages).
@@ -133,4 +136,4 @@ Kill the first mate session anytime; the next one reconciles and carries on.
 ## Development notes
 
 The current watcher reliability work combines always-on bash triage with a durable queue for actionable wakes, a race-proof singleton lock, duplicate self-eviction, drain-time liveness assertion, and a self-verifying tracked-child arm wrapper.
-The presence-gated sub-supervisor (`bin/fm-supervise-daemon.sh`) provides walk-away supervision via the `/afk` skill while reusing the same shared wake classifier as the always-on watcher.
+The always-on liveness daemon (`bin/fm-supervise-daemon.sh`) backstops watcher liveness and pokes a stalled session while the captain is present, and provides walk-away supervision via the `/afk` skill while reusing the same shared wake classifier as the always-on watcher.
