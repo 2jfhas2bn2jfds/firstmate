@@ -142,6 +142,9 @@ Otherwise it prints one line per problem or capability fact; handle each:
   This mirrors `/updatefirstmate`'s `nudge-secondmates:` report: it is a gentle steer, never an interruption, and the fast-forward already landed safely.
   A secondmate that was skipped, already current, or whose advance changed no instructions is not listed and must not be disturbed.
 - `FMX: X mode on ...` / `FMX: X mode off ...` - bootstrap confirmed or removed the local X-mode poll artifacts; follow section 14 for watcher cadence restart only when a running watcher needs the transition applied immediately.
+- `warning: <path> keeps a different repo-local git identity (...)` - a stderr advisory from the `config/git-author` alignment (section 2): the firstmate primary already carries an explicitly different `user.name`/`user.email` field, which is preserved rather than overwritten.
+  Leave it when the difference is intentional; otherwise reconcile that checkout manually with `git config --local`.
+  `fm-spawn.sh` prints the same warning when a launch target's identity conflicts.
 
 Bootstrap's fleet refresh is bounded by `FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT` seconds, default 20; a timeout is reported as a `FLEET_SYNC` skip and does not block startup.
 Bootstrap also silently ensures the always-on liveness daemon (section 8) is running: a pidfile naming a live process is left alone, otherwise it starts the daemon detached, skipping the start outside tmux where the daemon's supervisor-pane target cannot resolve.
@@ -362,6 +365,7 @@ This is a purely local fast-forward of tracked files - never a fetch from origin
 If that pre-launch fast-forward is skipped, `fm-spawn.sh` prints a concise warning to stderr and still launches the secondmate from its unchanged checkout.
 No nudge is needed at spawn because the agent reads `AGENTS.md` fresh on launch.
 Project worktrees start at detached HEAD on a clean default branch; ship briefs tell the crewmate to create its branch, while scout briefs keep the worktree scratch.
+When `config/git-author` is present, the script also sets the captain's repo-local `user.name`/`user.email` in the worktree or home it launches into, so agent commits attribute to one GitHub account (section 2); a conflicting explicitly-set identity field is preserved and reported to stderr.
 After spawning, peek the pane to confirm the crewmate is processing the brief and handle any trust dialog with `harness-adapters`.
 Add the task to `data/backlog.md` under In flight.
 
