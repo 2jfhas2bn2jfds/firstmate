@@ -104,6 +104,38 @@ SH
   pass "ensure_watcher_backstop throttles a burst to one launch"
 }
 
+# The backstop is an arm caller, so it must source this home's opted-in cadence
+# configs before launching the arm (AGENTS.md sections 14 and 15); otherwise a
+# recovery re-arm silently degrades X/email polling to the 300s default.
+_run_backstop_cadence_case() {  # <case-name> <cadence-file> <cadence-body> <expect>
+  local name=$1 cadence=$2 body=$3 expect=$4 dir state armlog i
+  dir=$(make_supercase "$name"); state="$dir/state"
+  armlog="$dir/arm-invoked"
+  fm_write_meta "$state/foo-x1.meta" "window=sess:fm-foo-x1" "kind=ship"
+  mkdir -p "$dir/config"
+  printf '%s\n' "$body" > "$dir/config/$cadence"
+  cat > "$dir/fake-arm.sh" <<SH
+#!/usr/bin/env bash
+echo "interval=\${FM_CHECK_INTERVAL:-none}" >> "$armlog"
+SH
+  chmod +x "$dir/fake-arm.sh"
+  FM_HOME="$dir" FM_WATCH_ARM_BIN="$dir/fake-arm.sh" ensure_watcher_backstop "$state"
+  i=0
+  while [ "$i" -lt 30 ] && [ ! -s "$armlog" ]; do sleep 0.1; i=$((i + 1)); done
+  [ -s "$armlog" ] || fail "$name: ensure_watcher_backstop did not launch the arm"
+  grep -q "interval=$expect" "$armlog" || fail "$name: backstop arm did not inherit FM_CHECK_INTERVAL=$expect from config/$cadence (got: $(cat "$armlog"))"
+}
+
+test_ensure_backstop_sources_x_cadence() {
+  _run_backstop_cadence_case backstop-x-cadence x-mode.env 'export FM_CHECK_INTERVAL=30' 30
+  pass "ensure_watcher_backstop sources config/x-mode.env so the re-armed watcher keeps the 30s cadence"
+}
+
+test_ensure_backstop_sources_email_cadence() {
+  _run_backstop_cadence_case backstop-email-cadence email-mode.env 'export FM_CHECK_INTERVAL=60' 60
+  pass "ensure_watcher_backstop sources config/email-mode.env so the re-armed watcher keeps the 60s cadence"
+}
+
 # --- (behavior 3) stranded-wake session poke --------------------------------
 
 test_poke_fires_on_aged_queue() {
@@ -277,6 +309,8 @@ test_backstop_no_arm_when_beacon_fresh
 test_backstop_no_arm_when_no_inflight
 test_ensure_backstop_launches_home_scoped_arm
 test_ensure_backstop_throttles_second_launch
+test_ensure_backstop_sources_x_cadence
+test_ensure_backstop_sources_email_cadence
 test_poke_fires_on_aged_queue
 test_poke_no_fire_on_fresh_queue
 test_poke_no_fire_on_empty_queue

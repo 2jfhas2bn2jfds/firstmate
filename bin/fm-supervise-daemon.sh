@@ -65,8 +65,9 @@
 # escalations before exit.
 #
 # Usage: fm-supervise-daemon.sh
-#          Long-lived background loop. Normally started by the /afk skill, which
-#          sets state/.afk first. Env knobs:
+#          Long-lived background loop. Normally ensured at session start by
+#          fm-bootstrap.sh, and also started by the /afk skill (which sets
+#          state/.afk first) or from the fm-guard.sh banner. Env knobs:
 #          FM_SUPERVISOR_TARGET     supervisor tmux target (override; otherwise
 #                                   auto-discovered from TMUX_PANE, then
 #                                   firstmate:0 fallback)
@@ -732,8 +733,13 @@ _backstop_should_arm() {  # <state>
 # double-forked ( ... & ) inside a subshell that exits immediately: the arm is
 # reparented away from the daemon (no zombie, never waited on) and re-establishes
 # a watcher that beats the beacon and enqueues future wakes. Home-scoped
-# (FM_STATE_OVERRIDE), never a broad pkill. The stranded-wake poke, not this,
-# re-invokes the LLM; this only keeps the enqueue machinery and beacon alive.
+# (FM_STATE_OVERRIDE), never a broad pkill. The subshell first sources this
+# home's X-mode/email-mode cadence configs when present, exactly as AGENTS.md
+# sections 14 and 15 require of an arm caller, so the re-armed watcher keeps the
+# opted-in FM_CHECK_INTERVAL (30s/60s) instead of degrading to the 300s default;
+# the sourcing is scoped to the arm launch, never the daemon itself. The
+# stranded-wake poke, not this, re-invokes the LLM; this only keeps the enqueue
+# machinery and beacon alive.
 ensure_watcher_backstop() {  # <state>
   local state=$1 age throttle
   _backstop_should_arm "$state" || return 0
@@ -742,7 +748,13 @@ ensure_watcher_backstop() {  # <state>
   _now > "$state/.subsuper-last-backstop-arm"
   age=$(_file_age "$state/.last-watcher-beat")
   log "watcher beacon stale ${age}s with $(_in_flight_count "$state") in flight; launching backstop re-arm"
-  ( FM_STATE_OVERRIDE="$state" "$FM_WATCH_ARM_BIN" >/dev/null 2>&1 & )
+  (
+    # shellcheck disable=SC1090,SC1091
+    [ -f "$FM_HOME/config/x-mode.env" ] && . "$FM_HOME/config/x-mode.env"
+    # shellcheck disable=SC1090,SC1091
+    [ -f "$FM_HOME/config/email-mode.env" ] && . "$FM_HOME/config/email-mode.env"
+    FM_STATE_OVERRIDE="$state" "$FM_WATCH_ARM_BIN" >/dev/null 2>&1 &
+  )
 }
 
 # --- (behavior 3) stranded-wake session poke --------------------------------
@@ -1075,7 +1087,7 @@ fm_super_main() {
     # panes from stale detection, so this cheap pane probe is the only thing that
     # can surface it. It only enqueues a durable wake (no classification), so it
     # is additive to afk behavior; present mode surfaces it via the poke below.
-    if [ "$(_file_age "$STATE/.subsuper-last-secondmate-probe")" -ge "${FM_SECONDMATE_PROBE_TICK:-$HOUSEKEEPING_TICK_DEFAULT}" ]; then
+    if [ "$(_file_age "$STATE/.subsuper-last-secondmate-probe")" -ge "${FM_SECONDMATE_PROBE_TICK:-${FM_HOUSEKEEPING_TICK:-$HOUSEKEEPING_TICK_DEFAULT}}" ]; then
       _now > "$STATE/.subsuper-last-secondmate-probe"
       secondmate_deadturn_probe "$STATE"
     fi

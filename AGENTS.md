@@ -143,6 +143,7 @@ Otherwise it prints one line per problem or capability fact; handle each:
 - `FMX: X mode on ...` / `FMX: X mode off ...` - bootstrap confirmed or removed the local X-mode poll artifacts; follow section 14 for watcher cadence restart only when a running watcher needs the transition applied immediately.
 
 Bootstrap's fleet refresh is bounded by `FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT` seconds, default 20; a timeout is reported as a `FLEET_SYNC` skip and does not block startup.
+Bootstrap also silently ensures the always-on liveness daemon (section 8) is running: a pidfile naming a live process is left alone, otherwise it starts the daemon detached, skipping the start outside tmux where the daemon's supervisor-pane target cannot resolve.
 
 Then read `data/projects.md`, the fleet registry, to load what each project is.
 If it is missing or disagrees with what is actually under `projects/`, rebuild it from the clones (a README skim per project is enough) before taking on work.
@@ -542,11 +543,12 @@ If a guard warning says watcher liveness is stale, arm `bin/fm-watch-arm.sh` aft
 
 **The always-on liveness daemon is the durable backstop for a reaped watcher-arm.**
 `bin/fm-supervise-daemon.sh` runs permanently as a detached, home-scoped, singleton liveness layer, not only during away stretches.
+Bootstrap ensures it is running at every session start (section 3), `/afk` starts it when entering away mode, and the guard banner below prompts a start if it is ever found dead, so the layer survives restarts instead of waiting for the first away stretch.
 While `state/.afk` exists it is the away-mode sub-supervisor exactly as before (it owns the watcher and injects batched escalations; the `/afk` skill owns that).
 While afk is off it is a *minimal* liveness layer that does not classify, batch, or absorb wakes - the always-on `fm-watch.sh` triage still owns that - and only does two things: it re-arms the home-scoped watcher itself (`bin/fm-watch-arm.sh`, never a broad pkill) when `state/.last-watcher-beat` goes stale beyond `FM_GUARD_GRACE` with work in flight, closing the gap when the harness reaps your watcher-arm background task; and, when actionable wakes have sat in `state/.wake-queue` past `FM_POKE_AFTER_SECS` (default 120s) with no active turn, it injects one marker-prefixed, single-line poke telling you to drain the queue and re-arm - the mechanism that re-invokes your session after the harness dropped the arm's wake exit.
 A marker-prefixed message that arrives while afk is off is exactly this liveness poke: treat it as an internal instruction (never captain-facing text), drain `state/.wake-queue` with `bin/fm-wake-drain.sh`, handle each wake, then re-arm the watcher.
 In both modes the daemon also probes each `kind=secondmate` pane for a dead-turn harness error (an idle secondmate pane that the watcher structurally never flags) and enqueues a durable recovery wake, so a secondmate whose turn died silently is surfaced within a poke interval instead of stranding for hours.
-Because the daemon is the backstop, `fm-guard.sh`'s no-watcher banner also prompts you to start it (`nohup bin/fm-supervise-daemon.sh >/dev/null 2>&1 &`) when it is not running.
+Because the daemon is the backstop, `fm-guard.sh`'s no-watcher banner also prompts you to start it when it is not running: run `nohup bin/fm-supervise-daemon.sh >/dev/null 2>>state/.supervise-daemon.startup.err &` from firstmate's own tmux pane (the daemon binds its poke target from that pane), and treat the backstop as armed only once `state/.supervise-daemon.pid` names a live process - a startup failure lands in `state/.supervise-daemon.startup.err` rather than vanishing.
 
 `fm-guard.sh` carries a second, independent alarm in the same bordered ●-marked style: the **worktree-tangle** guard.
 Firstmate is a treehouse-pooled git repo of itself - the primary checkout (the repo root, `FM_ROOT`) and every crewmate worktree and secondmate home are linked worktrees of one repo - and the primary must stay on its default branch.

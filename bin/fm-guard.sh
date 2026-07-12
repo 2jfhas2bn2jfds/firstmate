@@ -107,8 +107,11 @@ if [ "$watcher_fresh" = false ]; then
     printf '●  Trust bin/fm-watch-arm.sh for the true state: it confirms a live watcher and a fresh beacon, or fails loudly.\n'
     printf '●  %s\n' "$fix"
     if [ "$daemon_alive" = false ]; then
-      printf '●  The always-on liveness daemon is NOT running - start it so a reaped watcher-arm self-heals next time:\n'
-      printf '●      nohup bin/fm-supervise-daemon.sh >/dev/null 2>&1 &\n'
+      printf "●  The always-on liveness daemon is NOT running - start it from firstmate's own tmux pane\n"
+      printf '●  (the daemon binds its poke target from that pane) so a reaped watcher-arm self-heals next time:\n'
+      printf '●      nohup bin/fm-supervise-daemon.sh >/dev/null 2>>state/.supervise-daemon.startup.err &\n'
+      printf '●  The backstop is armed only once state/.supervise-daemon.pid names a live process; if the\n'
+      printf '●  daemon exits instead, the reason is in state/.supervise-daemon.startup.err.\n'
     fi
     printf '●%s\n' "$rule"
   } >&2
