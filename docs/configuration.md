@@ -137,6 +137,7 @@ FM_WATCH_TRIAGE_LOG_MAX_BYTES=262144   # size cap for the watcher's absorbed-wak
 FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=20   # seconds allowed for bootstrap's best-effort clone refresh
 FM_FLEET_PRUNE=1        # set to 0 to skip pruning local branches whose upstream is gone
 FM_BUSY_REGEX='esc (to )?interrupt|Working\.\.\.'   # busy-pane signatures, shared by watcher and tmux helper
+FM_BG_SHELL_REGEX='[0-9]+[[:space:]]+shells?[[:space:]]+still[[:space:]]+running|·[[:space:]]*[0-9]+[[:space:]]+shells?([[:space:]]|$)'   # claude background-shell footer signature; fm-crew-state.sh counts it as working for harness=claude panes
 FM_COMPOSER_IDLE_RE=    # optional empty-composer regex, applied after dim-ghost and border stripping
 FM_SEND_RETRIES=3       # fm-send Enter-retry attempts after typing the line once
 FM_SEND_SLEEP=0.4       # seconds between fm-send submit checks

@@ -29,7 +29,8 @@
 #
 # Per-harness override: FM_COMPOSER_IDLE_RE matches an empty composer after
 # dim-ghost and structural border stripping. FM_BUSY_REGEX overrides the busy
-# footer set (mirrors fm-watch.sh / the daemon).
+# footer set (mirrors fm-watch.sh / the daemon). FM_BG_SHELL_REGEX overrides
+# the claude background-shell footer set (fm_pane_has_bg_shell).
 #
 # All functions are `set -u` and `set -e` safe (guarded tmux calls, explicit
 # returns) so they can be sourced into either context.
