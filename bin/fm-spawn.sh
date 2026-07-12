@@ -38,9 +38,12 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 SUB_HOME_MARKER=".fm-secondmate-home"
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"
+# shellcheck source=bin/fm-git-author-lib.sh
+. "$SCRIPT_DIR/fm-git-author-lib.sh"
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
@@ -484,6 +487,14 @@ mkdir -p "$STATE"
     echo "projects=$SECONDMATE_PROJECTS"
   fi
 } > "$STATE/$ID.meta"
+
+# Repo-local git identity for this worktree/home from config/git-author, so agent
+# commits carry the captain's own GitHub identity instead of the machine default
+# (which would make GitHub suggest a Co-authored-by trailer on squash merge; see
+# fm-git-author-lib.sh). Scoped to $WT - the isolated worktree (ship/scout) or the
+# secondmate home - which is exactly what fm-spawn launches into; never a
+# projects/ primary. Idempotent, advisory, never global. No-op without the file.
+fm_git_author_apply "$WT" "$CONFIG/git-author"
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")

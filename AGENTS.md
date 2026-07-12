@@ -74,6 +74,7 @@ bin/                 helper scripts, committed; read each script's header before
 config/crew-harness  crewmate harness override; LOCAL, gitignored; absent or "default" = same as firstmate
 config/x-mode.env    generated X-mode watcher cadence; LOCAL, gitignored; source before arming watcher when present
 config/email-mode.env generated email-mode watcher cadence (60s); LOCAL, gitignored; source before arming watcher when present (section 15)
+config/git-author    captain's GitHub identity for agent commits (name=<username>, email=<id>+<username>@users.noreply.github.com); LOCAL, gitignored; read by fm-spawn (per worktree/home) and fm-bootstrap (primary) so commits attribute to one account and GitHub suggests no Co-authored-by trailer; absent = no-op
 data/                personal fleet records; LOCAL, gitignored as a whole
   backlog.md         task queue, dependencies, history
   captain.md         captain's curated personal preferences and working style; LOCAL, gitignored, and canonical even if harness memory mirrors it
