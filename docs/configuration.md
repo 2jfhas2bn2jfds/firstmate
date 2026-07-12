@@ -127,7 +127,7 @@ FMX_X_REPLY_MAX_CHARS=280   # X reply per-tweet split budget; values below 50 cl
 FMX_X_THREAD_MAX=25     # maximum tweets in one auto-split X reply thread
 FMX_FOLLOWUP_MAX_AGE_SECS=86400   # local window for posting one X completion follow-up
 FM_LOCK_STALE_AFTER=2   # seconds before dead-pid lock records can be reclaimed; mid-acquire locks keep at least 2s grace
-FM_GUARD_GRACE=300      # seconds before guard warnings and arm health checks treat a watcher beacon as stale
+FM_GUARD_GRACE=300      # seconds before guard warnings, arm health checks, and the daemon's present-mode backstop treat a watcher beacon as stale
 FM_ARM_CONFIRM_TIMEOUT=10   # seconds fm-watch-arm waits to confirm a fresh watcher before reporting FAILED
 FM_WATCHER_STALE_GRACE=300   # defaults to FM_GUARD_GRACE; seconds a live watcher lock may have a stale beacon before re-arm errors
 FM_SIGNAL_GRACE=30      # seconds to coalesce nearby status and turn-end signals into one wake
@@ -141,7 +141,7 @@ FM_COMPOSER_IDLE_RE=    # optional empty-composer regex, applied after dim-ghost
 FM_SEND_RETRIES=3       # fm-send Enter-retry attempts after typing the line once
 FM_SEND_SLEEP=0.4       # seconds between fm-send submit checks
 FM_SEND_SETTLE=1        # seconds fm-send waits after a successful text submit; 0 disables
-# sub-supervisor (bin/fm-supervise-daemon.sh); presence-gated via /afk
+# always-on liveness daemon (bin/fm-supervise-daemon.sh); away-mode escalations gated via /afk
 FM_SUPERVISOR_TARGET=firstmate:0   # supervisor tmux target (override; auto-discovers from $TMUX_PANE)
 FM_INJECT_SKIP=heartbeat           # |-prefixes force-self-handled bypassing classification; empty disables
 FM_ESCALATE_BATCH_SECS=90          # buffer window for batched escalation digests; 0 = flush immediately
@@ -157,4 +157,11 @@ FM_CRASH_BACKOFF=60                # seconds to wait after crossing the crash th
 FM_CRASH_NORMAL_SLEEP=5            # seconds to wait after an isolated watcher crash
 FM_LOG_MAX_BYTES=1048576           # daemon log size that triggers trimming
 FM_LOG_KEEP_LINES=2000             # daemon log lines kept when trimming
+FM_POKE_AFTER_SECS=120             # present mode: seconds a queued wake may sit stranded before one liveness poke
+FM_POKE_MIN_INTERVAL=600           # present mode: hard cap between liveness pokes regardless of new wakes
+FM_PRESENT_TICK=5                  # present mode: liveness loop cadence while afk is off
+FM_BACKSTOP_ARM_THROTTLE=30        # present mode: min seconds between backstop watcher-arm launches
+FM_SECONDMATE_DEADTURN_RE='API Error|ConnectionRefused'   # OR-ed harness dead-turn signatures probed in idle secondmate panes
+FM_SECONDMATE_PROBE_TICK=          # seconds between secondmate dead-turn probes; defaults to FM_HOUSEKEEPING_TICK
+FM_WATCH_ARM_BIN=bin/fm-watch-arm.sh   # watcher-arm script the present-mode backstop launches, mainly for tests
 ```
