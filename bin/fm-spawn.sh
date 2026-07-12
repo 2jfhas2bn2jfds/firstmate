@@ -491,10 +491,15 @@ mkdir -p "$STATE"
 # Repo-local git identity for this worktree/home from config/git-author, so agent
 # commits carry the captain's own GitHub identity instead of the machine default
 # (which would make GitHub suggest a Co-authored-by trailer on squash merge; see
-# fm-git-author-lib.sh). Scoped to $WT - the isolated worktree (ship/scout) or the
-# secondmate home - which is exactly what fm-spawn launches into; never a
-# projects/ primary. Idempotent, advisory, never global. No-op without the file.
-fm_git_author_apply "$WT" "$CONFIG/git-author"
+# fm-git-author-lib.sh). The command targets $WT - the isolated worktree
+# (ship/scout) or the secondmate home fm-spawn launches into; fm-spawn never runs
+# it inside a projects/ primary directory. The write still propagates: a
+# treehouse worktree's --local config resolves to the pooled clone's shared
+# common config, so the effective git identity of that project's checkouts
+# changes too - the intended mechanism by which crew commits attribute
+# correctly. Per-field, advisory, never global; a conflicting identity is
+# preserved and reported to stderr. No-op without the file.
+fm_git_author_apply "$WT" "$CONFIG/git-author" report
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
