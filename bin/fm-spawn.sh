@@ -14,6 +14,10 @@
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch after treehouse get unless the resolved pane
 #   path is a real git worktree root distinct from the primary project checkout.
+#   When config/git-author is present, the launch target (worktree or secondmate home)
+#   gets the captain's repo-local user.name/user.email so agent commits attribute to
+#   one GitHub account; a conflicting explicitly-set identity field is preserved and
+#   reported to stderr (see bin/fm-git-author-lib.sh).
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only

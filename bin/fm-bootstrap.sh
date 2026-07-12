@@ -43,6 +43,10 @@
 #          (bin/fm-supervise-daemon.sh) is running: silent, idempotent (a live
 #          pidfile is left alone), and skipped outside tmux where the daemon's
 #          supervisor-pane target cannot resolve.
+#          Bootstrap also aligns the primary checkout's repo-local git identity
+#          with config/git-author when present: silent when absent, matching, or
+#          newly set; an explicitly different identity field is preserved and a
+#          warning is printed to stderr (see bin/fm-git-author-lib.sh).
 #        fm-bootstrap.sh install <tool>...
 #          Install the named tools (only ones the captain approved).
 set -u
