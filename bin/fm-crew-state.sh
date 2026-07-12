@@ -18,7 +18,7 @@
 #   state: <working|parked|done|blocked|failed|unknown> · source: <run-step|pane|status-log|none> · <detail>
 #
 # Logic, in order:
-#   1. Resolve worktree + window + kind from state/<id>.meta.
+#   1. Resolve worktree + window + kind + harness from state/<id>.meta.
 #   2. Matching no-mistakes run for this crew's branch, active or terminal?
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
@@ -28,7 +28,8 @@
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
 #      agree, and are reported as parked.
 #   4. No run for this crew (pre-validation, or kind=scout): fall back to the
-#      pane busy-signature (fm-tmux-lib.sh) + the status log's last line.
+#      pane busy-signature (fm-tmux-lib.sh; for harness=claude a running
+#      background-shell footer also counts as busy) + the status log's last line.
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead window also reports unknown · none rather
 #      than trusting a stale status log.
