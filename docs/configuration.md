@@ -35,6 +35,24 @@ For `no-mistakes` projects, seeding initializes only projects newly cloned into 
 After creating a secondmate, move existing main-backlog items that you have judged in-scope with `fm-backlog-handoff.sh <secondmate-id> <item-key>...`; it is idempotent and refuses in-flight items or non-secondmate homes.
 Set `FM_SECONDMATE_CHARTER` to seed from inline charter text when no filled charter brief exists; set `FM_SECONDMATE_SCOPE` when the routing scope should differ from the charter text.
 
+## Agent commit identity (config/git-author)
+
+Treehouse worktrees are created with no repo-local git identity, so agent commits fall back to git's auto-derived `<user>@<host>.local` author.
+On a squash merge GitHub reads that author off the branch commits and appends a `Co-authored-by: <user> <...local>` trailer, because the branch author differs from the merging account; the harness "include co-authored-by" setting cannot suppress it, since the suggestion reads commit author metadata rather than harness config.
+
+To fix this at the source, put the captain's own GitHub identity in the gitignored local file `config/git-author`:
+
+```sh
+name=<github username>
+email=<id>+<username>@users.noreply.github.com
+```
+
+The noreply email attributes commits to the captain's GitHub account without exposing a real address (git requires some email; the noreply form satisfies both).
+`bin/fm-spawn.sh` sets this repo-local `user.name`/`user.email` in each crew worktree and secondmate home it launches into, and `bin/fm-bootstrap.sh` keeps the firstmate primary checkout aligned with it, so every agent commit is a single-author commit and GitHub suggests no co-author.
+The write is repo-local only - never global or system git config - and is idempotent.
+An explicitly-different repo-local identity is left untouched (bootstrap reports the skip); the whole feature is a silent no-op when the file is absent (the shared-template default) and emits one stderr warning when the file is present but unparseable.
+The file is entirely optional and lives only in this captain's fleet, so it is never committed to the shared template.
+
 ## FM_HOME
 
 `FM_HOME` selects the operational home for one firstmate instance.
