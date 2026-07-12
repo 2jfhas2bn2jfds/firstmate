@@ -45,10 +45,15 @@ Natural language is acceptable if uncertain.
 
 | Fact | Value |
 |---|---|
-| Busy-pane signature | `esc to interrupt` |
+| Busy-pane signature | `esc to interrupt` (mid-turn); also `<N> shell(s) still running` / the `· <N> shell` footer segment when idle-waiting on a background shell |
 | Exit command | `/exit` |
 | Interrupt | single Escape |
 | Skill invocation | `/<skill>` (e.g. `/no-mistakes`) |
+
+Claude has a second verified busy signature (observed live 2026-07-12).
+When a crew ends its turn but is idle-waiting on its own running background shell (a no-mistakes pipeline, a long RN build, a test run), the pane shows no `esc to interrupt` spinner - the turn is over - only a footer segment naming the still-running shell(s), in one of these forms: `✻ Cooked for 1m 4s · 1 shell still running`, `⏵⏵ bypass permissions on · 1 shell · ← for agents`, or `N shell(s) still running`.
+That footer means the crew is still working, so the pane-side busy detection in `bin/fm-tmux-lib.sh` (`fm_pane_has_bg_shell`, consulted by `bin/fm-crew-state.sh` for a `harness=claude` target) counts it as provably working, which stops false stale/wedge wakes on a healthy crew during long validations.
+It is a claude-specific footer, so it is gated on `harness=claude`.
 
 First launch in a fresh worktree, or first ever on a machine, may show a trust or bypass-permissions confirmation.
 After every spawn, peek the pane within about 20 seconds.
