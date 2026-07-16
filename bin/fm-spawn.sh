@@ -14,6 +14,10 @@
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch after treehouse get unless the resolved pane
 #   path is a real git worktree root distinct from the primary project checkout.
+#   When config/git-author is present, the launch target (worktree or secondmate home)
+#   gets the captain's repo-local user.name/user.email so agent commits attribute to
+#   one GitHub account; a conflicting explicitly-set identity field is preserved and
+#   reported to stderr (see bin/fm-git-author-lib.sh).
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -38,9 +42,12 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 SUB_HOME_MARKER=".fm-secondmate-home"
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"
+# shellcheck source=bin/fm-git-author-lib.sh
+. "$SCRIPT_DIR/fm-git-author-lib.sh"
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
@@ -484,6 +491,19 @@ mkdir -p "$STATE"
     echo "projects=$SECONDMATE_PROJECTS"
   fi
 } > "$STATE/$ID.meta"
+
+# Repo-local git identity for this worktree/home from config/git-author, so agent
+# commits carry the captain's own GitHub identity instead of the machine default
+# (which would make GitHub suggest a Co-authored-by trailer on squash merge; see
+# fm-git-author-lib.sh). The command targets $WT - the isolated worktree
+# (ship/scout) or the secondmate home fm-spawn launches into; fm-spawn never runs
+# it inside a projects/ primary directory. The write still propagates: a
+# treehouse worktree's --local config resolves to the pooled clone's shared
+# common config, so the effective git identity of that project's checkouts
+# changes too - the intended mechanism by which crew commits attribute
+# correctly. Per-field, advisory, never global; a conflicting identity is
+# preserved and reported to stderr. No-op without the file.
+fm_git_author_apply "$WT" "$CONFIG/git-author" report
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")

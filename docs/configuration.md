@@ -35,6 +35,27 @@ For `no-mistakes` projects, seeding initializes only projects newly cloned into 
 After creating a secondmate, move existing main-backlog items that you have judged in-scope with `fm-backlog-handoff.sh <secondmate-id> <item-key>...`; it is idempotent and refuses in-flight items or non-secondmate homes.
 Set `FM_SECONDMATE_CHARTER` to seed from inline charter text when no filled charter brief exists; set `FM_SECONDMATE_SCOPE` when the routing scope should differ from the charter text.
 
+## Agent commit identity (config/git-author)
+
+Treehouse worktrees are created with no repo-local git identity, so agent commits fall back to git's auto-derived `<user>@<host>.local` author.
+On a squash merge GitHub reads that author off the branch commits and appends a `Co-authored-by: <user> <...local>` trailer, because the branch author differs from the merging account; the harness "include co-authored-by" setting cannot suppress it, since the suggestion reads commit author metadata rather than harness config.
+
+To fix this at the source, put the captain's own GitHub identity in the gitignored local file `config/git-author`:
+
+```sh
+name=<github username>
+email=<id>+<username>@users.noreply.github.com
+```
+
+The noreply email attributes commits to the captain's GitHub account without exposing a real address (git requires some email; the noreply form satisfies both).
+`bin/fm-spawn.sh` sets this repo-local `user.name`/`user.email` in each crew worktree and secondmate home it launches into, and `bin/fm-bootstrap.sh` keeps the firstmate primary checkout aligned with it, so every agent commit is a single-author commit and GitHub suggests no co-author.
+Because a treehouse worktree's repo-local config resolves to the pooled clone's shared common config, the first spawn into a project sets the identity for that whole pool and every checkout of that project inherits it; that shared write is the intended mechanism, even though fm-spawn never runs the command inside a `projects/` primary directory.
+The write is repo-local only - never global or system git config - and is applied per field: `user.name` and `user.email` are each set when unset or already matching, so a partial identity self-heals, while a field holding a genuinely-different value is left untouched (spawn and bootstrap both report the skip to stderr).
+Known limitation: once a pool's shared config carries an agent identity, a later edit to `config/git-author` is not automatically pushed into already-touched pools; the mismatch is reported on each spawn rather than silently ignored, and is reconciled manually with `git config --local` in that pool when the edit was intentional.
+Blind auto-propagation would be unsafe because secondmate homes and firstmate-on-itself worktrees share the firstmate repo's config, whose explicitly-set identity the bootstrap conflict-preserve exists to protect.
+The whole feature is a silent no-op when the file is absent (the shared-template default) and emits one stderr warning when the file is present but unparseable.
+The file is entirely optional and lives only in this captain's fleet, so it is never committed to the shared template.
+
 ## FM_HOME
 
 `FM_HOME` selects the operational home for one firstmate instance.

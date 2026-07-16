@@ -43,6 +43,10 @@
 #          (bin/fm-supervise-daemon.sh) is running: silent, idempotent (a live
 #          pidfile is left alone), and skipped outside tmux where the daemon's
 #          supervisor-pane target cannot resolve.
+#          Bootstrap also aligns the primary checkout's repo-local git identity
+#          with config/git-author when present: silent when absent, matching, or
+#          newly set; an explicitly different identity field is preserved and a
+#          warning is printed to stderr (see bin/fm-git-author-lib.sh).
 #        fm-bootstrap.sh install <tool>...
 #          Install the named tools (only ones the captain approved).
 set -u
@@ -63,6 +67,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-x-lib.sh"
 # shellcheck source=bin/fm-email-lib.sh
 . "$SCRIPT_DIR/fm-email-lib.sh"
+# shellcheck source=bin/fm-git-author-lib.sh
+. "$SCRIPT_DIR/fm-git-author-lib.sh"
 
 fleet_sync() {
   [ -x "$FM_ROOT/bin/fm-fleet-sync.sh" ] || return 0
@@ -384,6 +390,15 @@ EOF
   echo "FME: email mode on - notifier armed via state/email-watch.check.sh; 60s watcher cadence in config/email-mode.env"
 }
 
+git_author_ensure() {
+  # Keep the firstmate primary checkout's repo-local git identity aligned with
+  # config/git-author, so firstmate's own commits (and any firstmate-on-itself
+  # crew whose worktree inherits the primary's shared config) carry the captain's
+  # GitHub identity, not the machine default. Silent when already set or the file
+  # is absent; an explicitly-different identity field is left untouched and reported.
+  fm_git_author_apply "$FM_ROOT" "$CONFIG/git-author" report
+}
+
 # Always-on liveness daemon (session start): ensure this home's detached,
 # singleton fm-supervise-daemon.sh is running, so the watcher-liveness backstop
 # and stranded-wake poke exist from bootstrap onward instead of waiting for the
@@ -437,6 +452,7 @@ if [ -n "$tangle_branch" ]; then
   tangle_default=$(fm_default_branch "$FM_ROOT" 2>/dev/null || echo main)
   echo "TANGLE: primary checkout on feature branch '$tangle_branch' (expected '$tangle_default'); the work is safe on that ref - restore the primary with: git -C $FM_ROOT checkout $tangle_default, then re-validate the branch in a proper worktree"
 fi
+git_author_ensure
 crew=
 [ -f "$CONFIG/crew-harness" ] && crew=$(tr -d '[:space:]' < "$CONFIG/crew-harness" || true)
 [ -n "$crew" ] && [ "$crew" != "default" ] && echo "CREW_HARNESS_OVERRIDE: $crew"
