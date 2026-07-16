@@ -18,7 +18,7 @@
 #   state: <working|parked|done|blocked|failed|unknown> · source: <run-step|pane|status-log|none> · <detail>
 #
 # Logic, in order:
-#   1. Resolve worktree + window + kind from state/<id>.meta.
+#   1. Resolve worktree + window + kind + harness from state/<id>.meta.
 #   2. Matching no-mistakes run for this crew's branch, active or terminal?
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
@@ -28,7 +28,8 @@
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
 #      agree, and are reported as parked.
 #   4. No run for this crew (pre-validation, or kind=scout): fall back to the
-#      pane busy-signature (fm-tmux-lib.sh) + the status log's last line.
+#      pane busy-signature (fm-tmux-lib.sh; for harness=claude a running
+#      background-shell footer also counts as busy) + the status log's last line.
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead window also reports unknown · none rather
 #      than trusting a stale status log.
@@ -74,6 +75,7 @@ WT=$(meta_value worktree)
 WIN=$(meta_value window)
 KIND=$(meta_value kind)
 [ -n "$KIND" ] || KIND=ship
+HARNESS=$(meta_value harness)
 
 # A torn-down (or never-created) worktree has no current state to read.
 if [ -z "$WT" ] || [ ! -d "$WT" ]; then
@@ -353,8 +355,16 @@ pane_readable "$WIN" || emit unknown none "window gone: $WIN"
 
 # Secondmates idle on their own watcher (idle pane = healthy), so the busy
 # signature is not meaningful for them; read their state from the status log only.
-if [ "$KIND" != secondmate ] && fm_pane_is_busy "$WIN"; then
-  emit working pane "harness busy"
+if [ "$KIND" != secondmate ]; then
+  if fm_pane_is_busy "$WIN"; then
+    emit working pane "harness busy"
+  # A claude crew that ended its turn but is idle-waiting on its OWN running
+  # background shell (a pipeline, an RN build) shows no busy spinner, only a
+  # background-shell footer. That footer means it is still working, so treat it
+  # as busy too. Gated on harness=claude because the footer form is claude's.
+  elif [ "$HARNESS" = claude ] && fm_pane_has_bg_shell "$WIN"; then
+    emit working pane "background shell running"
+  fi
 fi
 
 if [ -n "$LOG_VERB" ]; then
