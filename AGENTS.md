@@ -470,7 +470,7 @@ Whenever at least one task is in flight, keep `bin/fm-watch.sh` running through 
 It costs zero tokens while running.
 **Always-on wake triage (absorb only when provably working).**
 The watcher classifies every wake it detects in bash and absorbs the benign majority without ever waking you, but it never absorbs a crewmate that has stopped.
-The no-verb path - a `signal` whose status carries no captain-relevant verb (a `working:` note, a bare turn-ended) and a non-terminal `stale` (a crewmate gone quiet) - is absorbed ONLY while that crewmate shows positive evidence it is still working: its no-mistakes run for its branch is in an actively-running step, or its pane shows the harness busy signature.
+The no-verb path - a `signal` whose status carries no captain-relevant verb (a `working:` note, a bare turn-ended) and a non-terminal `stale` (a crewmate gone quiet) - is absorbed ONLY while that crewmate shows positive evidence it is still working: its no-mistakes run for its branch is in an actively-running step, or its pane shows the harness busy signature (for a claude crewmate, a running background-shell footer counts too).
 The watcher reads that evidence with `bin/fm-crew-state.sh` (run-step first, then pane), so a finish that wrote no `done:` status - for example one reported only through interactive pane menus - is no longer swallowed.
 A `heartbeat` with no captain-relevant change is likewise absorbed.
 Absorbed wakes are advanced past their suppression marker and logged to `state/.watch-triage.log` while the watcher keeps blocking - no queue entry, no exit, no LLM turn.

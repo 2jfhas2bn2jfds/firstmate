@@ -4,7 +4,8 @@
 # and keeps blocking; it queues and exits only for actionable wakes. The no-verb
 # turn-end / non-terminal-stale path is absorb-only-when-provably-working: a wake
 # is absorbed only when the crew shows POSITIVE evidence it is still working (an
-# actively-running no-mistakes step, or a busy pane), and surfaced otherwise, so a
+# actively-running no-mistakes step, or a busy pane - claude's background-shell
+# footer counts as busy), and surfaced otherwise, so a
 # crew that finishes (or stops and waits) without a captain-relevant status is
 # never silently swallowed. While state/.afk exists, the daemon owns triage and
 # this watcher queues and exits on every wake. Printed reason lines:
@@ -101,8 +102,9 @@ BUSY_REGEX=${FM_BUSY_REGEX:-'esc (to )?interrupt|Working\.\.\.'}
 # debug log, and keeps blocking WITHOUT enqueuing or exiting. The no-verb turn-end
 # / non-terminal-stale path is absorb-only-when-provably-working: such a wake is
 # absorbed ONLY while the crew shows positive evidence it is still working (an
-# actively-running no-mistakes step, or a busy pane, via crew_is_provably_working
-# over fm-crew-state.sh); a crew that stopped its turn with no running pipeline and
+# actively-running no-mistakes step, or a busy pane - claude's background-shell
+# footer counts as busy - via crew_is_provably_working over fm-crew-state.sh); a
+# crew that stopped its turn with no running pipeline and
 # no busy pane is SURFACED, so a finish reported only through interactive pane menus
 # (no done: status) is never swallowed. An ACTIONABLE wake (a captain-relevant
 # signal, a no-verb signal whose crew is not provably working, any check, a

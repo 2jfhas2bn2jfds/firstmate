@@ -86,7 +86,8 @@ signal_reason_is_actionable() {  # <file> ...
 #       branch is in an actively-running step (running/fixing/ci), NOT terminal,
 #       parked, passed, or failed; OR
 #   (b) state working from source pane     - the pane shows the harness busy
-#       signature.
+#       signature (or, for a harness=claude crew, the running background-shell
+#       footer read by fm_pane_has_bg_shell).
 # Everything else - a terminal/parked/failed run, an idle pane that fell back to a
 # stale "working:" status-log line (source status-log), a torn-down or unknown
 # crew, or an unreadable verdict - is NOT provably working, so the wake surfaces.
