@@ -88,6 +88,7 @@ The decision persists for the repo, so later worktrees of the same project skip 
 
 Resume after exit with `codex resume <session-id>`.
 The session id is printed on quit.
+Prefix that hand-typed resume with the same model-strip `env -u` that `bin/fm-spawn.sh` applies at spawn (copy the full `env -u ANTHROPIC_MODEL -u ANTHROPIC_DEFAULT_OPUS_MODEL ...` prefix from the send-keys call there); the pane inherits its tmux session environment, so a stale model pin recorded there would otherwise reach the resumed agent.
 
 ## opencode (VERIFIED 2026-06-11, v1.15.7-1.17.3)
 
@@ -99,7 +100,7 @@ The session id is printed on quit.
 
 No trust dialog.
 Opencode can auto-upgrade itself in the background and the running TUI can exit mid-task, observed live from 1.15.7 to 1.17.3.
-If a pane shows the exit banner, relaunch with `--continue` to resume the session.
+If a pane shows the exit banner, relaunch with `--continue` to resume the session, prefixed with the same model-strip `env -u` that `bin/fm-spawn.sh` applies at spawn (copy the full `env -u ANTHROPIC_MODEL -u ANTHROPIC_DEFAULT_OPUS_MODEL ...` prefix from the send-keys call there), since the pane still carries any stale model pin from its tmux session environment.
 `--prompt` does not auto-submit alongside `--continue`, so send the next instruction via `fm-send` once the TUI is up.
 
 ## pi (VERIFIED 2026-06-11)
