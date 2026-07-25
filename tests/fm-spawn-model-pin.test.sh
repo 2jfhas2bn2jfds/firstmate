@@ -224,6 +224,8 @@ test_env_unset_defeats_a_pinned_tmux_session() {
 
   run_in_pinned_pane guarded "$PREFIX" "$guarded" \
     || fail "guarded pane never wrote its environment"
+  assert_grep "PATH=" "$guarded" \
+    "the guarded child produced no environment: the strip prefix did not run printenv"
   for var in "${PINNED_VARS[@]}"; do
     assert_no_grep "$var=" "$guarded" \
       "the strip prefix left $var in the launched process's environment"
