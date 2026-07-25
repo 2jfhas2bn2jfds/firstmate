@@ -41,7 +41,7 @@ PINNED_VARS=(
 )
 # Derived from that one list, so adding a variable to the family updates both the expected
 # launch prefix and the assertions that look for it.
-PREFIX=env
+PREFIX="env"
 for pinned_var in "${PINNED_VARS[@]}"; do PREFIX="$PREFIX -u $pinned_var"; done
 PREFIX="$PREFIX "
 # Half 2 drives a PRIVATE tmux server (its own socket), so it never touches the
