@@ -39,7 +39,11 @@ PINNED_VARS=(
   ANTHROPIC_SMALL_FAST_MODEL
   CLAUDE_CODE_SUBAGENT_MODEL
 )
-PREFIX='env -u ANTHROPIC_MODEL -u ANTHROPIC_DEFAULT_OPUS_MODEL -u ANTHROPIC_DEFAULT_SONNET_MODEL -u ANTHROPIC_DEFAULT_HAIKU_MODEL -u ANTHROPIC_SMALL_FAST_MODEL -u CLAUDE_CODE_SUBAGENT_MODEL '
+# Derived from that one list, so adding a variable to the family updates both the expected
+# launch prefix and the assertions that look for it.
+PREFIX=env
+for pinned_var in "${PINNED_VARS[@]}"; do PREFIX="$PREFIX -u $pinned_var"; done
+PREFIX="$PREFIX "
 # Half 2 drives a PRIVATE tmux server (its own socket), so it never touches the
 # developer's live sessions and leaves nothing behind.
 E2E_SOCKET="fm-model-pin-$$"
@@ -222,10 +226,17 @@ test_env_unset_defeats_a_pinned_tmux_session() {
       "fixture is not exercising the bug: a plainly-launched child did not inherit $var"
   done
 
-  run_in_pinned_pane guarded "$PREFIX" "$guarded" \
+  # An assignment operand rides through the same prefix, because `env -u <flags>
+  # NAME=VALUE <command>` is exactly the composition the claude template's own env prefix
+  # and the secondmate FM_HOME overrides depend on: flags first, assignments after, and
+  # BSD env rejects the reverse order. Asserting the operand arrives intact proves that
+  # form executes, not just that it string-matches.
+  run_in_pinned_pane guarded "${PREFIX}FM_MODEL_PIN_PROBE=kept " "$guarded" \
     || fail "guarded pane never wrote its environment"
   assert_grep "PATH=" "$guarded" \
     "the guarded child produced no environment: the strip prefix did not run printenv"
+  assert_grep "FM_MODEL_PIN_PROBE=kept" "$guarded" \
+    "an assignment operand after the strip prefix's -u flags did not reach the child"
   for var in "${PINNED_VARS[@]}"; do
     assert_no_grep "$var=" "$guarded" \
       "the strip prefix left $var in the launched process's environment"

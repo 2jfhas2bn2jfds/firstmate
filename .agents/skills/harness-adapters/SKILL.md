@@ -15,6 +15,7 @@ The captain may override that file at bootstrap or later; a per-task instruction
 Each adapter splits into mechanics and knowledge.
 The mechanics, including launch command, autonomy flag, and turn-end hook, live in `bin/fm-spawn.sh`.
 The supervision knowledge lives here: busy signature, exit command, interrupt, dialogs, resume behavior, skill invocation, and quirks.
+The model-strip `env -u` prefix `fm-spawn` applies at launch covers an Anthropic/Claude-specific variable family, verified live on the claude and codex launches and not verified on opencode or pi, neither of which is installed here.
 
 Never dispatch a crewmate or secondmate on an unverified adapter.
 If `config/crew-harness` names an unverified adapter, tell the captain and fall back to firstmate's own harness until that adapter is verified.
