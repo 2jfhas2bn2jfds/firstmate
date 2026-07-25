@@ -539,11 +539,16 @@ fi
 # directly, so it cannot be a shell alias, function, or builtin, and a compound command
 # (`cd /x && agent`) fails in the pane rather than at spawn time. Set FM_KEEP_MODEL_ENV
 # truthy to skip the strip where these variables are the real model selection (Bedrock,
-# Vertex). The stripped family is Anthropic/Claude-specific: the claude launch was verified
-# live end to end under it, and the codex launch was verified live to start correctly under
-# it (codex selects its model and auth OpenAI-side, and macOS `ps` exposes no environment for
-# that binary, so its evidence is the successful launch rather than an environment read).
-# opencode and pi were not verified, because neither is installed on this machine.
+# Vertex); it is read from this script's own environment, so set it where every firstmate
+# home inherits it - a shell profile or the tmux environment, the same place those model
+# variables are set - since a launched pane inherits the tmux session environment rather
+# than the environment of the process that ran fm-spawn, and setting it only in one agent's
+# own process environment never reaches a secondmate or the crewmates that secondmate spawns.
+# The stripped family is Anthropic/Claude-specific: the claude launch was verified live end
+# to end under it, and the codex launch was verified live to start correctly under it (codex
+# selects its model and auth OpenAI-side, and macOS `ps` exposes no environment for that
+# binary, so its evidence is the successful launch rather than an environment read). The
+# opencode and pi launches are unverified under the strip.
 case "$(printf '%s' "${FM_KEEP_MODEL_ENV-}" | tr '[:upper:]' '[:lower:]')" in
   ''|0|false|no|off) LAUNCH="env -u ANTHROPIC_MODEL -u ANTHROPIC_DEFAULT_OPUS_MODEL -u ANTHROPIC_DEFAULT_SONNET_MODEL -u ANTHROPIC_DEFAULT_HAIKU_MODEL -u ANTHROPIC_SMALL_FAST_MODEL -u CLAUDE_CODE_SUBAGENT_MODEL $LAUNCH" ;;
 esac
