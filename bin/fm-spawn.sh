@@ -536,8 +536,12 @@ fi
 # environment, pane environment, or fm-spawn's own). A raw launch command must therefore be a
 # simple command, as the harness-name scan above assumes - env execs the command word
 # directly, so it cannot be a shell alias, function, or builtin, and a compound command
-# (`cd /x && agent`) fails in the pane rather than at spawn time.
-LAUNCH="env -u ANTHROPIC_MODEL -u ANTHROPIC_DEFAULT_OPUS_MODEL -u ANTHROPIC_DEFAULT_SONNET_MODEL -u ANTHROPIC_DEFAULT_HAIKU_MODEL -u ANTHROPIC_SMALL_FAST_MODEL -u CLAUDE_CODE_SUBAGENT_MODEL $LAUNCH"
+# (`cd /x && agent`) fails in the pane rather than at spawn time. Set FM_KEEP_MODEL_ENV
+# truthy to skip the strip where these variables are the real model selection (Bedrock,
+# Vertex).
+case "$(printf '%s' "${FM_KEEP_MODEL_ENV-}" | tr '[:upper:]' '[:lower:]')" in
+  ''|0|false|no|off) LAUNCH="env -u ANTHROPIC_MODEL -u ANTHROPIC_DEFAULT_OPUS_MODEL -u ANTHROPIC_DEFAULT_SONNET_MODEL -u ANTHROPIC_DEFAULT_HAIKU_MODEL -u ANTHROPIC_SMALL_FAST_MODEL -u CLAUDE_CODE_SUBAGENT_MODEL $LAUNCH" ;;
+esac
 tmux send-keys -t "$T" -l "$LAUNCH"
 sleep 0.3
 tmux send-keys -t "$T" Enter

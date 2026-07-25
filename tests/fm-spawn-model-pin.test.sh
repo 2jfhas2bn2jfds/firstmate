@@ -107,7 +107,7 @@ run_spawn() {
 }
 
 test_launch_command_strips_pin_on_every_path() {
-  local home proj wt subhome fakebin log out status launch kind
+  local home proj wt subhome fakebin log out status launch kind ship_launch=
   home="$TMP_ROOT/home"
   mkdir -p "$home/data"
   proj="$TMP_ROOT/proj"
@@ -154,7 +154,24 @@ test_launch_command_strips_pin_on_every_path() {
     if [ "$kind" = secondmate ]; then
       assert_contains "$launch" "FM_HOME=" "secondmate launch lost its FM_HOME override"
     fi
+    if [ "$kind" = ship ]; then
+      ship_launch=$launch
+    fi
   done
+
+  # The escape hatch: where these variables ARE the deliberate model selection
+  # (Bedrock, Vertex), FM_KEEP_MODEL_ENV keeps them - the launch is then exactly the
+  # default one without its strip prefix, harness command and brief untouched.
+  log="$TMP_ROOT/sendkeys-optout.log"
+  : > "$log"
+  out=$(FM_KEEP_MODEL_ENV=1 FM_FAKE_PANE_PATH="$wt" \
+    run_spawn "$home" "$log" "$fakebin" task-ship "$proj" codex)
+  status=$?
+  expect_code 0 "$status" "opt-out spawn should succeed"
+  assert_contains "$out" "spawned " "opt-out spawn did not report success"
+  launch=$(cat "$log")
+  [ "$launch" = "${ship_launch#"$PREFIX"}" ] \
+    || fail "FM_KEEP_MODEL_ENV must drop the strip prefix and change nothing else (got: $launch)"
   pass "fm-spawn: every launch path (ship, scout, secondmate) strips the model-pin family"
 }
 
@@ -168,7 +185,8 @@ test_launch_command_strips_pin_on_every_path() {
 run_in_pinned_pane() {
   local win=$1 prefix=$2 out=$3 done_marker="$3.done" i=0
   rm -f "$out" "$done_marker"
-  tmux -L "$E2E_SOCKET" new-window -d -t "$E2E_SES:" -n "$win" -c "$TMP_ROOT"
+  tmux -L "$E2E_SOCKET" new-window -d -t "$E2E_SES:" -n "$win" -c "$TMP_ROOT" \
+    bash --norc --noprofile
   tmux -L "$E2E_SOCKET" send-keys -t "$E2E_SES:$win" -l \
     "${prefix}printenv > '$out'; printf 'DONE\n' > '$done_marker'"
   tmux -L "$E2E_SOCKET" send-keys -t "$E2E_SES:$win" Enter
@@ -184,7 +202,12 @@ test_env_unset_defeats_a_pinned_tmux_session() {
   local control="$TMP_ROOT/control.env" guarded="$TMP_ROOT/guarded.env" var
   # Skip gracefully if tmux is not installed; half 1 runs over a fake tmux regardless.
   command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found"; return 0; }
+  # Pane shells run with no rc files: tmux applies the session environment first and a
+  # developer's own ~/.zshrc or ~/.bashrc exporting one of these variables would override
+  # it afterwards, defeating the fixture. The session-environment inheritance this half
+  # exists to prove is unaffected.
   tmux -L "$E2E_SOCKET" new-session -d -s "$E2E_SES" -x 200 -y 50 -c "$TMP_ROOT" \
+    bash --norc --noprofile \
     || fail "could not create tmux session $E2E_SES on socket $E2E_SOCKET"
   # The stale pins, recorded in the SESSION environment exactly as a long-running
   # firstmate session carries them. Every window created afterwards inherits them.

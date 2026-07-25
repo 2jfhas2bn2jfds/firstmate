@@ -140,6 +140,7 @@ FM_CHECK_INTERVAL=300   # seconds between slow checks (merge polls or the X-mode
 FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh
 FM_CREW_STATE_BIN=bin/fm-crew-state.sh   # test override for the current-state reader used by provably-working watcher triage
+FM_KEEP_MODEL_ENV=      # truthy keeps the model-selection env family at agent launch instead of stripping it, for Bedrock/Vertex setups that select the model that way
 FMX_PAIRING_TOKEN=      # X mode pairing token; .env opt-in authorizes replies and eligible lifecycle actions
 FMX_RELAY_URL=https://myfirstmate.io   # optional X relay override, mainly for local relay development
 FMX_ENV_FILE=           # optional alternate .env file for direct X client invocations; bootstrap still checks $FM_HOME/.env
