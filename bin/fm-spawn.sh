@@ -35,8 +35,8 @@
 # (ANTHROPIC_MODEL, ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL, ANTHROPIC_SMALL_FAST_MODEL,
 # CLAUDE_CODE_SUBAGENT_MODEL) so a stale model pin in the tmux session or pane environment
 # cannot leak into the launched agent; the agent resolves its model from its own harness
-# config, unless FM_KEEP_MODEL_ENV is set truthy, which skips the strip (see the comment at
-# the send-keys call below).
+# config, unless FM_KEEP_MODEL_ENV is set truthy, which skips the strip (see the comment on
+# the FM_KEEP_MODEL_ENV case below, which builds that prefix).
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<session:window> worktree=<path>
 # mode/yolo are resolved per-project from data/projects.md for ship/scout tasks;
 # secondmate spawns record mode=secondmate, yolo=off, home=, and projects=.

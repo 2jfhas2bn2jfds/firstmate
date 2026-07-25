@@ -14,7 +14,7 @@
 #
 # Two halves, both behavioral:
 #  1. drive fm-spawn over a fake tmux and assert the literal command it sends carries
-#     the prefix on every launch path (ship, scout, secondmate) while the rest of the
+#     the prefix on every launch path (ship, scout, secondmate, raw) while the rest of the
 #     launch - harness binary, brief, secondmate FM_HOME overrides - survives intact.
 #  2. prove the mechanism inside real tmux: in a session whose environment carries the
 #     pins, a plainly-sent command's child DOES inherit them (the bug, reproduced) while
@@ -128,7 +128,7 @@ test_launch_command_strips_pin_on_every_path() {
   printf '# Firstmate\n' > "$subhome/AGENTS.md"
   printf 'domain-z9\n' > "$subhome/.fm-secondmate-home"
 
-  for kind in ship scout secondmate; do
+  for kind in ship scout secondmate raw; do
     log="$TMP_ROOT/sendkeys-$kind.log"
     : > "$log"
     mkdir -p "$home/data/task-$kind"
@@ -141,6 +141,7 @@ test_launch_command_strips_pin_on_every_path() {
         printf 'charter\n' > "$home/data/domain-z9/brief.md"
         out=$(run_spawn "$home" "$log" "$fakebin" domain-z9 "$subhome" codex --secondmate)
         ;;
+      raw)   out=$(FM_FAKE_PANE_PATH="$wt" run_spawn "$home" "$log" "$fakebin" "task-$kind" "$proj" 'mytool --flag') ;;
     esac
     status=$?
     expect_code 0 "$status" "$kind spawn should succeed"
@@ -153,8 +154,18 @@ test_launch_command_strips_pin_on_every_path() {
       *) fail "$kind launch must start with '$PREFIX' (got: $launch)" ;;
     esac
     # The prefix must not swallow the rest of the launch.
-    assert_contains "$launch" "codex " "$kind launch lost its harness command"
-    assert_contains "$launch" "brief.md" "$kind launch lost its brief argument"
+    if [ "$kind" = raw ]; then
+      # The unverified-adapter escape hatch, whose harness name is scanned out of the raw
+      # command rather than read from a template. The strip is prepended AFTER that scan,
+      # so the recorded harness stays the raw command word; were it prepended before,
+      # every raw spawn would record harness=env.
+      assert_contains "$launch" "mytool --flag" "raw launch lost its command"
+      assert_grep "harness=mytool" "$home/state/task-raw.meta" \
+        "raw spawn recorded a harness from the strip prefix, not from its command word"
+    else
+      assert_contains "$launch" "codex " "$kind launch lost its harness command"
+      assert_contains "$launch" "brief.md" "$kind launch lost its brief argument"
+    fi
     if [ "$kind" = secondmate ]; then
       assert_contains "$launch" "FM_HOME=" "secondmate launch lost its FM_HOME override"
     fi
@@ -176,7 +187,7 @@ test_launch_command_strips_pin_on_every_path() {
   launch=$(cat "$log")
   [ "$launch" = "${ship_launch#"$PREFIX"}" ] \
     || fail "FM_KEEP_MODEL_ENV must drop the strip prefix and change nothing else (got: $launch)"
-  pass "fm-spawn: every launch path (ship, scout, secondmate) strips the model-pin family"
+  pass "fm-spawn: every launch path (ship, scout, secondmate, raw) strips the model-pin family"
 }
 
 # --- half 2: the mechanism inside real tmux --------------------------------------
