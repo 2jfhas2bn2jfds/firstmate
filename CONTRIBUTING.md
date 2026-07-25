@@ -75,6 +75,7 @@ tests/fm-fleet-sync.test.sh               # project clone refresh: safe detached
 tests/fm-x-mode.test.sh                   # X-mode poll, inbox context round-trip, reply threading, dismiss, dry-run preview, and .env-presence activation tests
 tests/fm-tangle-guard.test.sh             # primary-checkout tangle detection and spawn/brief isolation tests
 tests/fm-spawn-batch.test.sh              # batch dispatch and FM_HOME project-path scoping tests
+tests/fm-spawn-model-pin.test.sh          # model-selection env strip on every launch path (ship, scout, secondmate, raw), FM_KEEP_MODEL_ENV opt-out, and the tmux session-inheritance mechanism in a private-socket server
 tests/fm-update.test.sh                   # fast-forward-only self-update, reread, nudge, dedup, and skip-safety tests
 tests/fm-secondmate-sync.test.sh          # local-HEAD secondmate sync, no-fetch, bootstrap nudge gating, and spawn hook tests
 tests/fm-secondmate-lifecycle-e2e.test.sh # persistent secondmate routing, seeding, backlog handoff, spawn, recovery, teardown, and FM_HOME flow tests
