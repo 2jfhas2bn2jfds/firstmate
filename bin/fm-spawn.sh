@@ -31,6 +31,12 @@
 #     __PIEXT__    absolute path to state/<task-id>.pi-ext.ts (pi turn-end extension,
 #                  written by this script; outside the worktree to avoid pi's trust gate)
 # Per-harness turn-end hooks are installed automatically; some live outside the worktree.
+# Every launch is prefixed with an `env -u` that strips the whole model-selection family
+# (ANTHROPIC_MODEL, ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL, ANTHROPIC_SMALL_FAST_MODEL,
+# CLAUDE_CODE_SUBAGENT_MODEL) so a stale model pin in the tmux session or pane environment
+# cannot leak into the launched agent; the agent resolves its model from its own harness
+# config, unless FM_KEEP_MODEL_ENV is set truthy, which skips the strip (see the comment on
+# the FM_KEEP_MODEL_ENV case below, which builds that prefix).
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<session:window> worktree=<path>
 # mode/yolo are resolved per-project from data/projects.md for ship/scout tasks;
 # secondmate spawns record mode=secondmate, yolo=off, home=, and projects=.
@@ -515,6 +521,37 @@ if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"
 fi
+
+# Model-pin hygiene, applied to every launch path (ship, scout, secondmate, raw): strip the
+# whole model-selection family so the agent resolves its model from its own harness config
+# instead of inheriting a stale pin. A tmux pane inherits its session environment, so a pin
+# recorded there once (a firstmate session started when an older Opus was current) otherwise
+# reaches every agent launched in that session forever, including brand-new crewmates a
+# pinned secondmate spawns. ANTHROPIC_MODEL is only the direct form: ANTHROPIC_DEFAULT_*_MODEL
+# re-points the very `opus`/`sonnet`/`haiku` aliases this fix falls back on, and
+# ANTHROPIC_SMALL_FAST_MODEL and CLAUDE_CODE_SUBAGENT_MODEL redirect the background and
+# subagent models the same way, so all of them are stripped together. We unset rather than
+# pass an id: claude's "model": "opus" alias already tracks the current Opus, while an id
+# pinned in this tracked script would go stale the same way. `env -u` strips them at exec
+# time, whatever the pane shell and wherever the values came from (tmux global or session
+# environment, pane environment, or fm-spawn's own). A raw launch command must therefore be a
+# simple command, as the harness-name scan above assumes - env execs the command word
+# directly, so it cannot be a shell alias, function, or builtin, and a compound command
+# (`cd /x && agent`) fails in the pane rather than at spawn time. Set FM_KEEP_MODEL_ENV
+# truthy to skip the strip where these variables are the real model selection (Bedrock,
+# Vertex); it is read from this script's own environment, so set it where every firstmate
+# home inherits it - a shell profile or the tmux environment, the same place those model
+# variables are set - since a launched pane inherits the tmux session environment rather
+# than the environment of the process that ran fm-spawn, and setting it only in one agent's
+# own process environment never reaches a secondmate or the crewmates that secondmate spawns.
+# The stripped family is Anthropic/Claude-specific: the claude launch was verified live end
+# to end under it, and the codex launch was verified live to start correctly under it (codex
+# selects its model and auth OpenAI-side, and macOS `ps` exposes no environment for that
+# binary, so its evidence is the successful launch rather than an environment read). The
+# opencode and pi launches are unverified under the strip.
+case "$(printf '%s' "${FM_KEEP_MODEL_ENV-}" | tr '[:upper:]' '[:lower:]')" in
+  ''|0|false|no|off) LAUNCH="env -u ANTHROPIC_MODEL -u ANTHROPIC_DEFAULT_OPUS_MODEL -u ANTHROPIC_DEFAULT_SONNET_MODEL -u ANTHROPIC_DEFAULT_HAIKU_MODEL -u ANTHROPIC_SMALL_FAST_MODEL -u CLAUDE_CODE_SUBAGENT_MODEL $LAUNCH" ;;
+esac
 tmux send-keys -t "$T" -l "$LAUNCH"
 sleep 0.3
 tmux send-keys -t "$T" Enter

@@ -70,6 +70,12 @@ claude, codex, opencode, and pi are all empirically verified; new harnesses get 
 The verified adapter knowledge - busy signatures, interrupt and exit commands, skill-invocation syntax, and per-harness quirks - lives in [`.agents/skills/harness-adapters/SKILL.md`](../.agents/skills/harness-adapters/SKILL.md).
 Launch mechanics, including the verified command templates, live in [`bin/fm-spawn.sh`](../bin/fm-spawn.sh).
 
+Every launch is prefixed with an `env -u` that strips the model-selection family (`ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_OPUS_MODEL`, `ANTHROPIC_DEFAULT_SONNET_MODEL`, `ANTHROPIC_DEFAULT_HAIKU_MODEL`, `ANTHROPIC_SMALL_FAST_MODEL`, `CLAUDE_CODE_SUBAGENT_MODEL`), so every agent resolves its model from its own harness config.
+A pane inherits its tmux session environment, so a model id recorded in a long-running session would otherwise pin every agent launched there, including crewmates spawned by an already-pinned secondmate.
+Set `FM_KEEP_MODEL_ENV` truthy where those variables are the real model selection, as on Bedrock or Vertex; it is all-or-nothing and read from the environment only.
+A hand-typed relaunch or resume into an existing pane needs the same prefix, which [`.agents/skills/stuck-crewmate-recovery/SKILL.md`](../.agents/skills/stuck-crewmate-recovery/SKILL.md) and the adapter notes spell out.
+The stripped family is Anthropic/Claude-specific, and the prefix itself has been exercised live against the claude and codex launches only, which leaves each adapter's own verified status unchanged.
+
 ## Toolchain
 
 On first launch the first mate detects what its required toolchain is missing or too old (tmux, node, gh, treehouse with durable lease support, no-mistakes v1.31.2 or newer, gh-axi, chrome-devtools-axi, lavish-axi), lists it with the exact install commands, and installs only after you say go.
@@ -140,6 +146,7 @@ FM_CHECK_INTERVAL=300   # seconds between slow checks (merge polls or the X-mode
 FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh
 FM_CREW_STATE_BIN=bin/fm-crew-state.sh   # test override for the current-state reader used by provably-working watcher triage
+FM_KEEP_MODEL_ENV=      # truthy keeps the model-selection env family at agent launch instead of stripping it, for Bedrock/Vertex setups that select the model that way; read from the environment only, never from this home's .env, so set it where every firstmate home inherits it (a shell profile or the tmux environment, the same place those model variables are set), because a launched pane inherits the tmux session environment rather than the environment of the process that ran fm-spawn, so setting it only in one agent's own process environment never reaches a secondmate or the crewmates that secondmate spawns
 FMX_PAIRING_TOKEN=      # X mode pairing token; .env opt-in authorizes replies and eligible lifecycle actions
 FMX_RELAY_URL=https://myfirstmate.io   # optional X relay override, mainly for local relay development
 FMX_ENV_FILE=           # optional alternate .env file for direct X client invocations; bootstrap still checks $FM_HOME/.env

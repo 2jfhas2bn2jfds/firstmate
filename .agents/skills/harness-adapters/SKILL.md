@@ -15,6 +15,7 @@ The captain may override that file at bootstrap or later; a per-task instruction
 Each adapter splits into mechanics and knowledge.
 The mechanics, including launch command, autonomy flag, and turn-end hook, live in `bin/fm-spawn.sh`.
 The supervision knowledge lives here: busy signature, exit command, interrupt, dialogs, resume behavior, skill invocation, and quirks.
+The model-strip `env -u` prefix `fm-spawn` applies at launch covers an Anthropic/Claude-specific variable family; the prefix itself has been exercised live against the claude and codex launches and has not been exercised against an opencode or pi launch, which leaves each adapter's own verified status below unchanged.
 
 Never dispatch a crewmate or secondmate on an unverified adapter.
 If `config/crew-harness` names an unverified adapter, tell the captain and fall back to firstmate's own harness until that adapter is verified.
@@ -88,6 +89,7 @@ The decision persists for the repo, so later worktrees of the same project skip 
 
 Resume after exit with `codex resume <session-id>`.
 The session id is printed on quit.
+Prefix that hand-typed resume with the same model-strip `env -u` that `bin/fm-spawn.sh` applies at spawn (copy the full `env -u ANTHROPIC_MODEL -u ANTHROPIC_DEFAULT_OPUS_MODEL ...` prefix from the `FM_KEEP_MODEL_ENV` case that builds it there, and skip it where `FM_KEEP_MODEL_ENV` is set truthy so spawn does not strip either); the pane inherits its tmux session environment, so a stale model pin recorded there would otherwise reach the resumed agent.
 
 ## opencode (VERIFIED 2026-06-11, v1.15.7-1.17.3)
 
@@ -99,7 +101,7 @@ The session id is printed on quit.
 
 No trust dialog.
 Opencode can auto-upgrade itself in the background and the running TUI can exit mid-task, observed live from 1.15.7 to 1.17.3.
-If a pane shows the exit banner, relaunch with `--continue` to resume the session.
+If a pane shows the exit banner, relaunch with `--continue` to resume the session, prefixed with the same model-strip `env -u` that `bin/fm-spawn.sh` applies at spawn (copy the full `env -u ANTHROPIC_MODEL -u ANTHROPIC_DEFAULT_OPUS_MODEL ...` prefix from the `FM_KEEP_MODEL_ENV` case that builds it there, and skip it where `FM_KEEP_MODEL_ENV` is set truthy so spawn does not strip either), since the pane still carries any stale model pin from its tmux session environment.
 `--prompt` does not auto-submit alongside `--continue`, so send the next instruction via `fm-send` once the TUI is up.
 
 ## pi (VERIFIED 2026-06-11)
