@@ -31,6 +31,9 @@
 #     __PIEXT__    absolute path to state/<task-id>.pi-ext.ts (pi turn-end extension,
 #                  written by this script; outside the worktree to avoid pi's trust gate)
 # Per-harness turn-end hooks are installed automatically; some live outside the worktree.
+# Every launch is prefixed with `env -u ANTHROPIC_MODEL` so a stale model pin in the tmux
+# session or pane environment cannot leak into the launched agent; the agent resolves its
+# model from its own harness config (see the comment at the send-keys call below).
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<session:window> worktree=<path>
 # mode/yolo are resolved per-project from data/projects.md for ship/scout tasks;
 # secondmate spawns record mode=secondmate, yolo=off, home=, and projects=.
@@ -515,6 +518,18 @@ if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"
 fi
+
+# Model-pin hygiene, applied to every launch path (ship, scout, secondmate, raw): strip
+# ANTHROPIC_MODEL so the agent resolves its model from its own harness config instead of
+# inheriting a stale pin. A tmux pane inherits its session environment, so a pin recorded
+# there once (a firstmate session started when an older Opus was current) otherwise reaches
+# every agent launched in that session forever, including brand-new crewmates a pinned
+# secondmate spawns. We unset rather than pass an id: claude's "model": "opus" alias already
+# tracks the current Opus, while an id pinned in this tracked script would go stale the same
+# way. `env -u` strips it at exec time, whatever the pane shell and wherever the value came
+# from (tmux global or session environment, pane environment, or fm-spawn's own). A raw
+# launch command must therefore be a simple command, as the harness-name scan above assumes.
+LAUNCH="env -u ANTHROPIC_MODEL $LAUNCH"
 tmux send-keys -t "$T" -l "$LAUNCH"
 sleep 0.3
 tmux send-keys -t "$T" Enter

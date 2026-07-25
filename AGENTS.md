@@ -366,6 +366,8 @@ If that pre-launch fast-forward is skipped, `fm-spawn.sh` prints a concise warni
 No nudge is needed at spawn because the agent reads `AGENTS.md` fresh on launch.
 Project worktrees start at detached HEAD on a clean default branch; ship briefs tell the crewmate to create its branch, while scout briefs keep the worktree scratch.
 When `config/git-author` is present, the script also sets the captain's repo-local `user.name`/`user.email` in the worktree or home it launches into, so agent commits attribute to one GitHub account (section 2); a conflicting explicitly-set identity field is preserved and reported to stderr.
+Every launch is prefixed with `env -u ANTHROPIC_MODEL`, so each agent resolves its model from its own harness config instead of inheriting a stale pin: a tmux pane inherits its session environment, so a model id recorded there once would otherwise reach every agent launched in that session forever, including brand-new crewmates a pinned secondmate spawns.
+A hand-typed relaunch into an existing pane needs the same prefix (`stuck-crewmate-recovery`).
 After spawning, peek the pane to confirm the crewmate is processing the brief and handle any trust dialog with `harness-adapters`.
 Add the task to `data/backlog.md` under In flight.
 
