@@ -80,13 +80,14 @@ data/                personal fleet records; LOCAL, gitignored as a whole
   captain.md         captain's curated personal preferences and working style; LOCAL, gitignored, and canonical even if harness memory mirrors it
   projects.md        thin fleet navigation registry; firstmate-private, parsed by fm-project-mode.sh (section 6)
   secondmates.md      secondmate routing table; firstmate-private, maintained by fm-home-seed.sh (section 6)
+  closed.md          topics the captain has closed; LOCAL, gitignored (closures are captain-specific, the mechanism is shared). fm-spawn refuses any ship/scout spawn matching one (section 7); bootstrap reports the count and slugs (section 3)
   <id>/brief.md      per-task crewmate brief, or per-secondmate charter brief when kind=secondmate
   <id>/report.md     scout task deliverable, written by the crewmate; survives teardown
 projects/            cloned repos; gitignored; READ-ONLY for you
 state/               volatile runtime signals; gitignored
   <id>.status        appended by crewmates: "<state>: <note>" wake-event lines, not current-state truth
   <id>.turn-ended    touched by turn-end hooks
-  <id>.meta          written by fm-spawn: window=, worktree=, project=, harness=, kind=, mode=, yolo=; kind=secondmate also records home= and projects= (fm-pr-check appends pr= and verified pr_head= when available; fm-x-link appends x_request= and x_request_ts= for an X-mention-originated task, section 14)
+  <id>.meta          written by fm-spawn: window=, worktree=, project=, harness=, kind=, mode=, yolo=; ship/scout also record why= (the intake tag and note, section 7) and reopened_closed= when a closure was explicitly overridden; kind=secondmate also records home= and projects= (fm-pr-check appends pr= and verified pr_head= when available; fm-x-link appends x_request= and x_request_ts= for an X-mention-originated task, section 14)
   <id>.check.sh      optional slow poll you write per task (e.g. merged-PR check)
   x-watch.check.sh   generated X-mode relay poll shim; present only when opted in (section 14)
   x-inbox/           generated X-mode pending mention payloads; fmx-respond drains it (section 14)
@@ -136,6 +137,7 @@ Otherwise it prints one line per problem or capability fact; handle each:
 - `FLEET_SYNC: <repo>: recovered: <detail>` - the clone had drifted onto a clean detached HEAD holding no unique commits and the sync self-healed it (re-attached the default branch and fast-forwarded); no action needed, it is reported only so the self-heal is visible.
 - `FLEET_SYNC: <repo>: STUCK: on <state>, N commits behind <base> - needs attention` - the clone is dirty, on a non-default branch, detached with unique commits, or diverged, so the sync left it untouched (never forcing or discarding); it will keep falling behind until you look. A loud STUCK, especially a growing N across bootstraps, means that clone needs hands-on attention; dispatch a crewmate or resolve it before it strands work.
 - `SECONDMATE_SYNC: secondmate <id>: skipped: <reason>` - the local-HEAD secondmate sync left a live secondmate home on its existing checkout because the home was dirty, diverged, unsafe, on the wrong branch, missing the primary target commit, or otherwise not fast-forwardable; bootstrap continued, but inspect the reason because the secondmate may be stale after a primary update.
+- `CLOSED_TOPICS: <n> closed at intake: <slugs>` - the topics the captain has closed, listed so they are visible before any dispatch decision; `fm-spawn.sh` refuses a ship or scout spawn that matches one (section 7). Not a problem to fix: record it and do not reopen any of them without the captain's explicit word.
 - `TASKS_AXI: available` - an optional capability fact, not a problem; record it silently and use section 10 for backlog mutations.
   It prints only after the `tasks-axi` compatibility probe passes for version 0.1.1 or newer; absence or incompatibility only falls back to hand-editing and never blocks work.
 - `NUDGE_SECONDMATES: <window-targets...>` - the secondmate sweep fast-forwarded one or more *running* secondmate homes to firstmate's current version and their instructions actually changed; for each listed window, send a one-line re-read nudge with `bin/fm-send.sh <window-target> 'firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions.'` so that secondmate picks up its new instructions.
@@ -344,15 +346,25 @@ Write the brief per section 11.
 Load `harness-adapters` before spawning or recovering any direct report so trust dialogs, verified adapters, and harness-specific behavior are handled correctly.
 
 ```sh
-bin/fm-spawn.sh <id> projects/<repo>             # uses the active crewmate harness
-bin/fm-spawn.sh <id> projects/<repo> codex       # per-task harness override
-bin/fm-spawn.sh <id> projects/<repo> --scout     # scout task; records kind=scout in meta
+bin/fm-spawn.sh <id> projects/<repo> --why captain            # uses the active crewmate harness
+bin/fm-spawn.sh <id> projects/<repo> --why blocks:<what> codex   # per-task harness override
+bin/fm-spawn.sh <id> projects/<repo> --why captain --scout    # scout task; records kind=scout in meta
 bin/fm-spawn.sh <id> --secondmate                 # launch a registered persistent secondmate in its home
 bin/fm-spawn.sh <id> <firstmate-home> --secondmate   # launch or recover an explicit secondmate home
-bin/fm-spawn.sh <id1>=projects/<repo1> <id2>=projects/<repo2> [--scout]   # batch: one call, several tasks
+bin/fm-spawn.sh <id1>=projects/<repo1> <id2>=projects/<repo2> --why captain [--scout]   # batch: one call, several tasks
 ```
 
-Dispatch several tasks in one call by passing `id=repo` pairs instead of a single `<id> <project>`; each pair is spawned through the same single-task path, a shared `--scout` applies to all, and the looping happens inside the script so you never hand-write a multi-task shell loop.
+**Every ship and scout spawn must declare `--why <tag>[:<note>]`, and the script refuses without it.**
+There are exactly three tags: `captain` (the captain asked for this), `blocks:<what>` (it blocks something the captain asked for, naming what), and `incident` (a live production incident affecting users right now).
+There is no tag for "interesting", "worth doing", "found while looking at X", or "tidy-up", because those are not reasons to spend the captain's attention; work that fits none of the three tags goes in the backlog for the captain to choose, or nowhere.
+The tag and note are recorded as `why=` in the task's meta.
+`--secondmate` is exempt: launching a persistent supervisor is lifecycle, not work.
+
+**A closed topic refuses at the spawn call.**
+The script matches the task id and the brief text against `data/closed.md` and refuses, printing the closure line, when they hit; `--reopen-closed` proceeds and records `reopened_closed=<slug>` in meta, and is only for a reopen the captain explicitly authorised.
+Add a closure line when the captain closes a topic: `- <slug>: <comma-separated keywords>: <one-line why> (closed <date>)`, with specific multi-word keywords (a bare generic word blocks unrelated work).
+
+Dispatch several tasks in one call by passing `id=repo` pairs instead of a single `<id> <project>`; each pair is spawned through the same single-task path, a shared `--scout` and a shared `--why` apply to all, and the looping happens inside the script so you never hand-write a multi-task shell loop.
 If one pair fails, the rest still run and the batch exits non-zero.
 
 The script resolves the harness (`fm-harness.sh crew`), owns the verified launch templates, resolves the project's delivery mode (`fm-project-mode.sh`) for ship/scout tasks, and records `harness=`, `kind=`, `mode=`, and `yolo=` in the task's meta; a non-flag third argument containing whitespace is treated as a raw launch command (only for verifying new adapters).
@@ -609,6 +621,12 @@ Reaches the captain immediately:
 - A real blocker or failure after the playbook is exhausted, with evidence.
 - Anything destructive, irreversible, or security-sensitive.
 - A needed credential or login.
+
+**An untagged live-state claim is not relayed to the captain as fact.**
+A claim about live state - a store listing, the running app, production data, deployed config, a dashboard, third-party console settings - is relayed as fact only when it carries `[fetched <source> <ISO-8601 timestamp>]` from the crewmate that fetched it, or when you fetched it yourself in this session.
+Otherwise it is relayed as "not checked", and that "not checked" travels with the claim through every restatement.
+Specificity is not freshness: a detailed, confident, internally consistent description of a live artefact reads identically whether it is current or months stale, so neither the detail nor your confidence in it is evidence of recency.
+This is a loud rule, not an enforced one - nothing in the machinery can tell a fresh claim from a stale one - so it holds only if you apply it every time.
 
 Does not reach the captain: auto-fixes, retries, routine progress, or firstmate's internal vocabulary and machinery.
 Batch non-urgent updates into your next natural reply.

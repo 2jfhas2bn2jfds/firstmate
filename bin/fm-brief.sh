@@ -28,6 +28,9 @@
 # Scout tasks ignore mode - their deliverable is a report, not a merge.
 # Ship tasks include a project-memory section so durable project-intrinsic
 # learnings can be committed to AGENTS.md through the project's delivery path.
+# Ship and scout briefs also carry a required freshness-provenance section: any claim
+# about LIVE state must be tagged [fetched <source> <ISO-8601 timestamp>], and an
+# untagged live-state claim is reported as unverified rather than as fact.
 # Every generated brief (ship, scout, and the secondmate charter) also has the
 # captain's "## Engineering conventions" section from data/captain.md injected near
 # the top, so the conventions reach every crewmate at spawn; it is a graceful no-op
@@ -82,6 +85,27 @@ captain_conventions_body() {
     started { if (NF || seen) { seen = 1; print } }
   ' "$captain"
 }
+# Freshness provenance, injected into every ship and scout brief.
+#
+# This is a LOUD control, not an impossible one, and it is written here rather than
+# enforced in a script because no script can tell a fresh description of a live
+# artefact from a stale one - that is exactly the failure it addresses. A detailed,
+# confident, internally consistent account of a store listing was read as verified
+# because it was specific; it was months old. Specificity is not freshness, and
+# nothing in stale content distinguishes it from current content, so the only
+# available signal is an explicit fetch tag that a crewmate must either produce or
+# visibly fail to produce.
+FRESHNESS_BLOCK=$(cat <<'EOF'
+
+# Freshness provenance (required)
+Any claim you make about LIVE state must carry an inline provenance tag: `[fetched <source> <ISO-8601 timestamp>]`.
+Live state means anything that can change without a commit: a store listing, the running app, production data, deployed config, dashboards, remote branches and PR state, third-party console settings, prices, live copy.
+Example: `the listing subtitle is "Fitness dating" [fetched App Store Connect 2026-07-27T14:02Z]`.
+An untagged live-state claim is UNVERIFIED. Write it as unverified ("not checked", "as of an unknown date"), never as fact, and carry that "not checked" through every place the claim is repeated: notes, report, PR body, status line.
+Specificity is not freshness. A detailed, confident, internally consistent description of a live artefact reads exactly the same whether it was fetched a minute ago or is months out of date, so detail is never evidence of recency and neither is your own confidence.
+If you cannot fetch it, say so plainly and say what you would have needed. Do not reconstruct live state from memory, from a previous report, from a cached export, or from the repo, and then present it as current.
+EOF
+)
 CONV_BODY=$(captain_conventions_body)
 CONVENTIONS_BLOCK=""
 if [ -n "$CONV_BODY" ]; then
@@ -186,6 +210,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 6. If a decision belongs to a human (product choices, destructive actions),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
+${FRESHNESS_BLOCK}
 
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
@@ -248,6 +273,7 @@ $RULE1
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 6. If a decision belongs to a human (product choices, destructive actions, ask-user findings),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
+${FRESHNESS_BLOCK}
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.

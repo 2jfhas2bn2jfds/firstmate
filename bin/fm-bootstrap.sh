@@ -7,6 +7,7 @@
 #                 "CREW_HARNESS_OVERRIDE: <name>",
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
 #                 "TASKS_AXI: available", "TANGLE: <remediation>",
+#                 "CLOSED_TOPICS: <n> closed at intake: <slugs>",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: <window-targets...>",
 #                 "FMX: X mode on ..." or "FMX: X mode off ...",
@@ -25,6 +26,10 @@
 #          "treehouse get --lease" support.
 #          no-mistakes is also MISSING when its installed version is older than
 #          1.31.2.
+#          A CLOSED_TOPICS line lists the topics the captain has closed, which
+#          fm-spawn refuses at intake (bin/fm-closed-lib.sh). It is printed only
+#          when data/closed.md holds at least one well-formed entry; an absent or
+#          entry-free register is silent, so bootstrap stays quiet by default.
 #          tasks-axi is an OPTIONAL backlog-management capability reported only
 #          when tasks-axi --version is 0.1.1 or newer. It is never a MISSING
 #          line and never prompts an install.
@@ -57,10 +62,13 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # shellcheck source=bin/fm-tasks-axi-lib.sh
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-tangle-lib.sh
 . "$SCRIPT_DIR/fm-tangle-lib.sh"
+# shellcheck source=bin/fm-closed-lib.sh
+. "$SCRIPT_DIR/fm-closed-lib.sh"
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 # shellcheck source=bin/fm-x-lib.sh
@@ -422,6 +430,19 @@ liveness_daemon_ensure() {
   ( FM_HOME="$FM_HOME" nohup "$daemon" >/dev/null 2>&1 & )
 }
 
+# Closed topics the intake gate will refuse (bin/fm-closed-lib.sh). Reported at
+# session start so the closures are visible before any dispatch decision is made,
+# rather than only surfacing as a refusal later. Silent when the register is absent
+# or holds no entries: bootstrap's contract is that silence means all good.
+closed_topics_report() {
+  local register="$DATA/closed.md" slugs count
+  [ -f "$register" ] || return 0
+  slugs=$(fm_closed_slugs "$register" | paste -sd, - | sed 's/,/, /g')
+  [ -n "$slugs" ] || return 0
+  count=$(fm_closed_slugs "$register" | grep -c . || true)
+  echo "CLOSED_TOPICS: $count closed at intake: $slugs"
+}
+
 if [ "${1:-}" = "install" ]; then
   shift
   [ $# -gt 0 ] || { echo "usage: fm-bootstrap.sh install <tool>..." >&2; exit 1; }
@@ -457,6 +478,7 @@ crew=
 [ -f "$CONFIG/crew-harness" ] && crew=$(tr -d '[:space:]' < "$CONFIG/crew-harness" || true)
 [ -n "$crew" ] && [ "$crew" != "default" ] && echo "CREW_HARNESS_OVERRIDE: $crew"
 fm_tasks_axi_compatible && echo "TASKS_AXI: available"
+closed_topics_report
 secondmate_sync
 x_mode_setup
 email_mode_setup

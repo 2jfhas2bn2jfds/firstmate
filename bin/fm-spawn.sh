@@ -1,8 +1,20 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse worktree, or a secondmate in
 # its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> [harness|launch-command] [--scout]
+# Usage: fm-spawn.sh <task-id> <project-dir> --why <tag>[:<note>] [harness|launch-command] [--scout]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [harness|launch-command] --secondmate
+#   INTAKE GATE 1 - self-initiated work defaults to OFF. Every ship and scout spawn
+#   REFUSES unless --why declares why the work exists, with one of exactly three tags:
+#   captain (the captain asked), blocks (it blocks something the captain asked for),
+#   incident (a live production incident affecting users now). Recorded as why= in the
+#   task's meta. "Interesting", "worth doing", "found while looking at X" and "tidy-up"
+#   are not reasons to start work, and there is no tag for them. --secondmate is exempt:
+#   launching a persistent supervisor is lifecycle, not work.
+#   INTAKE GATE 2 - closed topics refuse at intake. The task id and the brief text are
+#   matched against data/closed.md (see bin/fm-closed-lib.sh for the register format and
+#   the exact matching rule); a match REFUSES and prints the closure line verbatim.
+#   --reopen-closed proceeds anyway, records reopened_closed=<slug> in meta, and prints a
+#   loud warning; it exists so the captain can authorise a reopen deliberately.
 #   With no harness arg, the harness comes from fm-harness.sh crew (config/crew-harness,
 #   falling back to firstmate's own harness). A bare adapter name (claude|codex|
 #   opencode|pi) overrides it for this spawn. A non-flag string containing whitespace
@@ -19,9 +31,9 @@
 #   one GitHub account; a conflicting explicitly-set identity field is preserved and
 #   reported to stderr (see bin/fm-git-author-lib.sh).
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
-#     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
+#     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar --why captain:asked [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
-#   source of truth; a shared --scout applies to every pair. The loop lives here, in bash,
+#   source of truth; a shared --scout and a shared --why apply to every pair. The loop lives here, in bash,
 #   so callers never hand-write a multi-task shell loop (the tool shell is zsh, which does
 #   not word-split unquoted $vars and silently breaks ad-hoc `for ... in $pairs` loops).
 #   Launch templates live in launch_template() below; placeholders replaced before launch:
@@ -54,18 +66,88 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 # shellcheck source=bin/fm-git-author-lib.sh
 . "$SCRIPT_DIR/fm-git-author-lib.sh"
+# shellcheck source=bin/fm-closed-lib.sh
+. "$SCRIPT_DIR/fm-closed-lib.sh"
+CLOSED="$DATA/closed.md"
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
 KIND=ship
+WHY=
+REOPEN_CLOSED=
 POS=()
-for a in "$@"; do
-  case "$a" in
+
+# INTAKE GATE 1: self-initiated work defaults to OFF.
+#
+# The rule "do not start work the captain did not ask for" was written down, loaded,
+# and broken anyway - on 2026-07-27 roughly two of six crews were on requested work,
+# and the rest came from alerts, anomalies and crew observations that read as
+# interesting. Prose did not hold. A non-zero exit does, so the declaration of WHY the
+# work exists is now an argument the caller cannot omit, and the tag vocabulary has no
+# slot for "interesting". Three tags, and only three: if the work fits none of them, it
+# does not start.
+why_refusal() {
+  local reason=$1
+  cat >&2 <<'EOF'
+error: refusing to spawn - work must declare why it exists.
+
+  --why captain[:<note>]    the captain asked for this
+  --why blocks:<what>       it blocks something the captain asked for (name what)
+  --why incident[:<note>]   a live production incident affecting users right now
+
+Those are the only three reasons to start work. "Interesting", "worth doing",
+"found while looking at X", "we may as well" and "tidy-up" are NOT reasons, and
+there is deliberately no tag for them: work with no captain behind it costs the
+captain attention he did not agree to spend. If the work fits none of the three
+tags, it does not start - queue it in the backlog and let the captain choose.
+EOF
+  printf 'reason: %s\n' "$reason" >&2
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
     --scout) KIND=scout ;;
     --secondmate) KIND=secondmate ;;
-    *) POS+=("$a") ;;
+    --reopen-closed) REOPEN_CLOSED=1 ;;
+    --why)
+      if [ $# -lt 2 ]; then
+        why_refusal "--why was given with no value"
+        exit 2
+      fi
+      WHY=$2
+      shift
+      ;;
+    --why=*) WHY=${1#--why=} ;;
+    *) POS+=("$1") ;;
   esac
+  shift
 done
+
+# Validate --why here, before the batch split, so a bad batch fails whole rather than
+# per pair; the re-exec below forwards the validated value so each pair records it.
+WHY_TAG=
+WHY_NOTE=
+if [ "$KIND" != secondmate ]; then
+  case "$WHY" in
+    *:*) WHY_TAG=${WHY%%:*}; WHY_NOTE=${WHY#*:} ;;
+    *) WHY_TAG=$WHY; WHY_NOTE= ;;
+  esac
+  WHY_TAG=$(printf '%s' "$WHY_TAG" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
+  # Collapse the note to a single line: meta is a key=value file, so an embedded
+  # newline would forge a meta key.
+  WHY_NOTE=$(printf '%s' "$WHY_NOTE" | tr '\n\r' '  ' | sed 's/^ *//; s/ *$//')
+  case "$WHY_TAG" in
+    captain|blocks|incident) : ;;
+    '') why_refusal "no --why was given"; exit 2 ;;
+    *) why_refusal "'$WHY_TAG' is not a valid --why tag"; exit 2 ;;
+  esac
+  if [ "$WHY_TAG" = blocks ] && [ -z "$WHY_NOTE" ]; then
+    why_refusal "--why blocks must name what it blocks (--why blocks:<what>)"
+    exit 2
+  fi
+  WHY_RECORD=$WHY_TAG
+  [ -n "$WHY_NOTE" ] && WHY_RECORD="$WHY_TAG: $WHY_NOTE"
+fi
 
 # Batch dispatch (see header): when the first positional is an `id=repo` pair, treat every
 # positional as one and spawn each by re-execing this script in single-task mode. We use
@@ -86,11 +168,14 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
       echo "error: batch dispatch does not support --secondmate; spawn each secondmate explicitly" >&2
       rc=2
       continue
-    elif [ "$KIND" = scout ]; then
-      if FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "${pair%%=*}" "${pair#*=}" --scout; then :; else echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2; rc=1; fi
-    else
-      if FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "${pair%%=*}" "${pair#*=}"; then :; else echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2; rc=1; fi
     fi
+    # The shared --why (already validated above) and --reopen-closed are forwarded to
+    # every pair, so each task's meta records its own why= and the closed-topic gate
+    # sees the same authorisation the batch was given.
+    batch_flags=(--why "$WHY_RECORD")
+    if [ "$KIND" = scout ]; then batch_flags+=(--scout); fi
+    if [ -n "$REOPEN_CLOSED" ]; then batch_flags+=(--reopen-closed); fi
+    if FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "${pair%%=*}" "${pair#*=}" "${batch_flags[@]}"; then :; else echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2; rc=1; fi
   done
   exit "$rc"
 fi
@@ -351,6 +436,46 @@ else
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
 
+# INTAKE GATE 2: closed topics refuse at intake.
+#
+# The captain has closed topics across multiple sessions, and each new session
+# reopened them, because a closure recorded only in prose does not survive a context
+# reset while the topic itself still looks live. Closure is therefore enforced where
+# the work would START, not where it would be reported: by the time a report exists,
+# the attention has already been spent. Matched against the task id AND the brief text
+# (see bin/fm-closed-lib.sh for the register format and matching rule). Secondmate
+# launches are exempt - they carry a charter, not a task.
+REOPENED_CLOSED=
+if [ "$KIND" != secondmate ] && [ -f "$CLOSED" ]; then
+  closed_hay=$(mktemp "${TMPDIR:-/tmp}/fm-closed.XXXXXX")
+  { printf '%s\n' "$ID"; cat "$BRIEF"; } > "$closed_hay"
+  closed_hits=$(fm_closed_match "$CLOSED" "$closed_hay" || true)
+  rm -f "$closed_hay"
+  if [ -n "$closed_hits" ]; then
+    closed_slugs=$(printf '%s\n' "$closed_hits" | cut -f1 | paste -sd, -)
+    if [ -n "$REOPEN_CLOSED" ]; then
+      REOPENED_CLOSED=$closed_slugs
+      {
+        echo "!!! WARNING: --reopen-closed is REOPENING a topic the captain closed."
+        echo "!!! Closure(s) overridden: $closed_slugs"
+        printf '%s\n' "$closed_hits" | cut -f2- | sed 's/^/!!!   /'
+        echo "!!! This is only correct if the captain authorised the reopen. Recorded in $STATE/$ID.meta."
+      } >&2
+    else
+      {
+        echo "error: refusing to spawn $ID - this topic is CLOSED."
+        printf '%s\n' "$closed_hits" | cut -f2- | sed 's/^/  /'
+        echo
+        echo "The captain closed it; a closure is a decision, not a stale note. Do not"
+        echo "re-investigate, re-litigate, or re-raise it. If the captain has explicitly"
+        echo "authorised reopening it, pass --reopen-closed (it is recorded in meta);"
+        echo "otherwise drop the work. The register is $CLOSED."
+      } >&2
+      exit 3
+    fi
+  fi
+fi
+
 # Same session when firstmate already runs inside tmux; dedicated session otherwise.
 if [ -n "${TMUX:-}" ]; then
   SES=$(tmux display-message -p '#S')
@@ -495,6 +620,11 @@ mkdir -p "$STATE"
   if [ "$KIND" = secondmate ]; then
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
+  else
+    # Why this work exists (intake gate 1) and any closure it overrode (gate 2), so the
+    # provenance of a task survives the session that dispatched it.
+    echo "why=$WHY_RECORD"
+    if [ -n "$REOPENED_CLOSED" ]; then echo "reopened_closed=$REOPENED_CLOSED"; fi
   fi
 } > "$STATE/$ID.meta"
 
