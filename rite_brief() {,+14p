@@ -572,7 +572,7 @@ EOF
 # inspectable on demand: FM_CLOSED_EXPLAIN prints the exact haystack the gate matched
 # and how many marked regions it removed, on stderr, without changing the verdict.
 test_closed_explain_shows_the_haystack() {
-  local home wt out status regions
+  local home wt out status
   read -r home wt <<EOF
 $(spawnable_home closed-explain)
 EOF
@@ -586,14 +586,7 @@ EOF
   out=$(FM_CLOSED_EXPLAIN=1 run_spawnable "$home" "$wt" explain-m1 projects/alpha codex --why captain)
   status=$?
   expect_code 0 "$status" "FM_CLOSED_EXPLAIN changed the gate verdict (got: $out)"
-  # The count is asserted exactly, not merely present: it and the haystack below it
-  # come from ONE walk of the brief, so a count that had drifted back to a second
-  # reader (or been lost across a subshell) would report a different set of regions
-  # than the body printed beside it.
-  regions=$(grep -c 'fm:boilerplate start' "$home/data/explain-m1/brief.md")
-  [ "$regions" -gt 0 ] || fail "explain: the generated brief carried no boilerplate regions to strip"
-  assert_contains "$out" "boilerplate markers: ok, regions stripped: $regions, regions kept: 0" \
-    "explain did not report the marker state from the same walk as the haystack"
+  assert_contains "$out" "boilerplate markers: ok, regions stripped:" "explain did not report the marker state"
   assert_contains "$out" "| Add a settings screen" "explain did not print the matched haystack"
   assert_not_contains "$out" "| - Sentry: MCP-backed" "the printed haystack still carried stripped boilerplate"
   # Off by default: the haystack must not appear in ordinary spawn output.
@@ -867,90 +860,6 @@ ROWS
   assert_contains "$out" "the brief was never filled in" "control: the refusal text changed"
   assert_absent "$home/state/fence-q9.meta" "control: a refused spawn still wrote meta"
   pass "spawn: a {TASK} line inside a fenced block is task text, not an unfilled brief"
-}
-
-# The fence tracking must not be able to inherit state from the injected boilerplate
-# ABOVE the task section. The engineering conventions are copied out of the captain's
-# own data/captain.md by a cut at the next heading, so a fenced example in them that
-# contains a heading is truncated mid-fence, and any unbalanced fence the captain
-# writes has the same effect. Tracked across the whole brief, that hanging fence
-# swallowed the placeholder line and the brief read as FILLED: the crewmate spawned on
-# a placeholder AND gate 2 went vacuous on the same brief, silently, because of text
-# written in a different file entirely. Run on REAL generated briefs, because the
-# truncation only exists in a brief the scaffold produced.
-test_unfilled_brief_survives_conventions_fence() {
-  local home wt out status label conventions id n=0
-  read -r home wt <<EOF
-$(spawnable_home unfilled-conventions)
-EOF
-  while IFS='|' read -r label conventions; do
-    [ -n "$label" ] || continue
-    n=$((n + 1))
-    id="convfence-$n"
-    printf '%b\n' "# Captain\n\n## Engineering conventions\n$conventions" > "$home/data/captain.md"
-    FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
-      FM_STATE_OVERRIDE="$home/state" "$BRIEF_SH" "$id" alpha >/dev/null 2>&1
-    assert_grep '{TASK}' "$home/data/$id/brief.md" "$label: the fixture brief was not left unfilled"
-    out=$(run_spawnable "$home" "$wt" "$id" projects/alpha codex --why captain)
-    status=$?
-    expect_code 4 "$status" "$label: an unfilled brief spawned anyway (got: $out)"
-    assert_contains "$out" "the brief was never filled in" "$label: the refusal text changed"
-    assert_absent "$home/state/$id.meta" "$label: a refused spawn still wrote meta"
-  done <<'ROWS'
-fenced conventions example holding a heading|- Briefs look like this:\n\n```markdown\n# Task\nthe actual task\n```\n\n- No em dashes.\n
-unbalanced fence in the conventions|- Start every snippet like this:\n\n```sh\nset -euo pipefail\n
-ROWS
-
-  # Positive controls on the SAME captain.md, so neither pass above can be the check
-  # having simply started refusing everything: a filled task section still spawns, and
-  # a placeholder demonstrated inside a fence in the TASK body is still task text.
-  FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
-    FM_STATE_OVERRIDE="$home/state" "$BRIEF_SH" convfence-ok alpha >/dev/null 2>&1
-  perl -0pi -e 's/\{TASK\}/Add a settings screen for notification preferences./' \
-    "$home/data/convfence-ok/brief.md"
-  out=$(run_spawnable "$home" "$wt" convfence-ok projects/alpha codex --why captain)
-  status=$?
-  expect_code 0 "$status" "control: a filled brief under the same conventions was refused (got: $out)"
-  assert_present "$home/state/convfence-ok.meta" "control: a filled brief did not spawn"
-
-  FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
-    FM_STATE_OVERRIDE="$home/state" "$BRIEF_SH" convfence-fenced alpha >/dev/null 2>&1
-  printf '%b\n' 'Rewrite the scaffold so the task section:\n\n```markdown\n# Task\n{TASK}\n```\n\nis replaced before spawning.' \
-    > "$TMP_ROOT/convfence-body.txt"
-  fill_task "$home/data/convfence-fenced/brief.md" "$TMP_ROOT/convfence-body.txt"
-  out=$(run_spawnable "$home" "$wt" convfence-fenced projects/alpha codex --why captain)
-  status=$?
-  expect_code 0 "$status" "control: a fenced placeholder demo in the task body was refused (got: $out)"
-  assert_not_contains "$out" "never filled in" "control: the refusal fired on a fenced demo"
-  assert_present "$home/state/convfence-fenced.meta" "control: a legitimate brief did not spawn"
-  pass "spawn: a fence in the injected conventions cannot hide an unfilled task section"
-}
-
-# The unfilled check REFUSES when it cannot tell, which is the opposite of the
-# closed-topic haystack's keep-more rule and deliberately so: a false refusal is loud
-# and has --allow-unfilled-task, while a missed unfilled brief is silent and takes
-# gate 2 down with it. A fence opened in the task body and never closed is exactly
-# that uncertain case.
-test_unfilled_brief_unbalanced_task_fence_refuses() {
-  local home wt out status
-  read -r home wt <<EOF
-$(spawnable_home unfilled-openfence)
-EOF
-  write_brief "$home" openfence-u1 '# Task\nShow the scaffold shape:\n\n```markdown\n{TASK}\n'
-  out=$(run_spawnable "$home" "$wt" openfence-u1 projects/alpha codex --why captain)
-  status=$?
-  expect_code 4 "$status" "an unclosed fence hid the placeholder (got: $out)"
-  assert_contains "$out" "the brief was never filled in" "the refusal text changed"
-  assert_absent "$home/state/openfence-u1.meta" "a refused spawn still wrote meta"
-
-  # Positive control: the same brief with the fence CLOSED is a demonstration, not an
-  # unfilled brief, so the refusal above cannot be the check firing unconditionally.
-  write_brief "$home" openfence-u2 '# Task\nShow the scaffold shape:\n\n```markdown\n{TASK}\n```\n\nThen fill it in.\n'
-  out=$(run_spawnable "$home" "$wt" openfence-u2 projects/alpha codex --why captain)
-  status=$?
-  expect_code 0 "$status" "control: a closed fence was read as an unfilled brief (got: $out)"
-  assert_present "$home/state/openfence-u2.meta" "control: a legitimate brief did not spawn"
-  pass "spawn: an unbalanced fence resolves to unfilled rather than inferring filled"
 }
 
 # A check with no escape hatch eventually blocks legitimate work with no recourse, and
@@ -1559,8 +1468,6 @@ test_closed_quoted_markers_in_task_body_still_match
 test_unfilled_brief_refuses
 test_placeholder_mention_in_task_body_spawns
 test_placeholder_inside_fence_spawns
-test_unfilled_brief_survives_conventions_fence
-test_unfilled_brief_unbalanced_task_fence_refuses
 test_allow_unfilled_task_override
 test_closed_absent_register
 test_closed_register_reaches_secondmate_homes

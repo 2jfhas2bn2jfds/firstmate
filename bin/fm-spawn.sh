@@ -15,7 +15,11 @@
 #   carries the scaffold's unreplaced {TASK} placeholder on a line of its own, OUTSIDE any
 #   fenced code block: the brief was never filled in, and an empty task body would leave
 #   gate 2 below with nothing to match. A brief that mentions the placeholder in prose, or
-#   demonstrates the scaffold's shape inside a fence, is unaffected.
+#   demonstrates the scaffold's shape inside a fence, is unaffected. The scan starts at the
+#   brief's own "# Task" heading with fence state reset, so a fence left hanging open in the
+#   injected conventions above it cannot hide the placeholder; where the fence state is
+#   ambiguous the brief is treated as UNFILLED, the loud direction, since this check has a
+#   waiver and a missed unfilled brief also empties gate 2.
 #   --allow-unfilled-task proceeds anyway, records allowed_unfilled_task=1 in meta, and
 #   prints a loud warning; like --reopen-closed it is a per-task waiver, so batch dispatch
 #   REFUSES it (exit 2) rather than waiving the check for every pair.
@@ -540,23 +544,51 @@ fi
 # so both forms have to pass. The fence tracking is deliberately the whole of the
 # markdown this check understands: it is a collision guard, not a parser.
 #
+# THE SCAN IS SCOPED TO THE BRIEF'S OWN TASK SECTION, and fence state is RESET there,
+# because nothing above that heading can say whether the task section was filled in.
+# The block above it is the injected engineering conventions, copied out of
+# data/captain.md by a cut at the next heading, so a fenced example in the captain's
+# conventions is truncated mid-fence and leaves a fence hanging open. Tracked across
+# the whole brief, that open fence swallowed the placeholder line and reported the
+# brief as FILLED: the crewmate spawned on a placeholder, and gate 2 went vacuous on
+# the same brief at the same moment, silently, because of text the captain wrote
+# somewhere else entirely.
+#
+# The direction of failure here is INVERTED from the closed-topic haystack, and the
+# two must not be reasoned about together. That haystack keeps MORE text when unsure,
+# because a missed closure is invisible. This check REFUSES when unsure, because a
+# false refusal is loud, lands on whoever ran the spawn, and has --allow-unfilled-task
+# to get through, while a missed unfilled brief is silent and takes gate 2 down with
+# it. So an unbalanced fence never infers "filled": a placeholder inside a fence that
+# is still open at the end of the scan counts as unfilled.
+#
 # --allow-unfilled-task is the escape hatch, and it exists because a check with no
 # recourse eventually blocks legitimate work with no way through - gate 2 itself has
 # --reopen-closed, and this check must not be stricter than the closure gate. Like
 # that flag it is loud and recorded in meta, so the waiver leaves a trace.
 brief_has_unfilled_task() {
-  awk '
+  awk -v heading='# Task' '
     function trim(t) { sub(/^[ \t]+/, "", t); sub(/[ \t\r]+$/, "", t); return t }
-    {
-      line = trim($0)
-      if (line ~ /^(```|~~~)/) {
-        if (!fence) { fence = 1; marker = substr(line, 1, 3) }
-        else if (substr(line, 1, 3) == marker) fence = 0
-        next
+    { all[n++] = $0; if (!start && trim($0) == heading) start = n }
+    END {
+      # start == 0 means the brief carries no task heading (a hand-written brief):
+      # scan the whole file, still with fence state starting closed.
+      for (i = start; i < n; i++) {
+        line = trim(all[i])
+        if (line ~ /^(```|~~~)/) {
+          if (!fence) { fence = 1; marker = substr(line, 1, 3); pending = 0 }
+          else if (substr(line, 1, 3) == marker) { fence = 0; pending = 0 }
+          continue
+        }
+        if (line != "{TASK}") continue
+        if (!fence) { found = 1; break }
+        pending = 1
       }
-      if (!fence && line == "{TASK}") { found = 1; exit }
+      # A fence still open at the end never closed, so a placeholder "inside" it was
+      # never demonstrably inside a fenced block. Resolve that to unfilled.
+      if (!found && fence && pending) found = 1
+      exit(found ? 0 : 1)
     }
-    END { exit(found ? 0 : 1) }
   ' "$1"
 }
 UNFILLED_TASK_ALLOWED=
@@ -635,6 +667,9 @@ if [ "$KIND" != secondmate ] && [ -n "$CLOSED" ] && [ -f "$CLOSED" ]; then
     } >&2
   fi
   closed_hay=$(mktemp "${TMPDIR:-/tmp}/fm-closed.XXXXXX")
+  # A brace group with a redirection, never a command substitution: the body has to be
+  # produced in THIS shell so FM_CLOSED_LAST_MARKER_STATUS survives for the explain
+  # block below, which is what keeps the counts and the body from one single walk.
   { printf '%s\n' "$ID"; fm_closed_haystack_body "$BRIEF"; } > "$closed_hay"
   # Narrowing the haystack is the one place this gate can quietly cover less than the
   # captain believes, so it has to be inspectable rather than merely asserted to be
@@ -642,9 +677,8 @@ if [ "$KIND" != secondmate ] && [ -n "$CLOSED" ] && [ -f "$CLOSED" ]; then
   case "${FM_CLOSED_EXPLAIN:-}" in
     ''|0|false|no|off) : ;;
     *)
-      closed_markers=$(fm_closed_marker_status "$BRIEF")
       read -r closed_marker_state closed_marker_count closed_marker_kept <<EOF
-$closed_markers
+$FM_CLOSED_LAST_MARKER_STATUS
 EOF
       {
         echo "closed-topic gate: brief $BRIEF"

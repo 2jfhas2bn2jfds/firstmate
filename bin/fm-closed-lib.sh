@@ -202,6 +202,10 @@ fm_closed_walk() {
 #               that also open with an injected heading and are therefore dropped,
 #               <kept> counts the marked regions that do not and are therefore kept
 #   unbalanced  a start with no end, an end with no start, or a nested start
+#
+# For the status of a brief whose haystack you are ALSO taking, do not call this:
+# read FM_CLOSED_LAST_MARKER_STATUS after fm_closed_haystack_body, so the counts and
+# the body provably come from one pass over one file.
 fm_closed_marker_status() {
   local brief=$1
   if [ ! -f "$brief" ]; then
@@ -251,14 +255,22 @@ fm_closed_marker_status() {
 # cannot drift into warning about a different set of regions than was matched.
 #
 # Set FM_CLOSED_EXPLAIN=1 on a spawn to see the exact haystack this produced and how
-# many marked regions it removed.
+# many marked regions it removed. Those counts come from FM_CLOSED_LAST_MARKER_STATUS,
+# which this function sets from the SAME walk it printed the body from, so a caller
+# that wants both never re-reads the brief and can never print counts describing a
+# different pass than the body beside them. Read it right after the call; it is
+# overwritten by the next one. Reading it needs the call to run in the current shell,
+# so capture the body with a redirection rather than a command substitution.
+FM_CLOSED_LAST_MARKER_STATUS='none 0 0'
 fm_closed_haystack_body() {
   local brief=$1 walked status state stripped kept
+  FM_CLOSED_LAST_MARKER_STATUS='none 0 0'
   [ -f "$brief" ] || return 0
   # ONE walk, consumed twice: the warnings below describe exactly the body printed
   # after them, because both come out of the same pass.
   walked=$(fm_closed_walk "$brief")
   status=$(printf '%s\n' "$walked" | head -n 1 | cut -d' ' -f2-)
+  FM_CLOSED_LAST_MARKER_STATUS=$status
   read -r state stripped kept <<EOF
 $status
 EOF
