@@ -17,15 +17,26 @@
 # Blank lines and lines whose first non-space character is '#' are comments.
 # A line that does not start with "- " is ignored, so a hand-written note in the
 # file never becomes a silent gate. A line that DOES start with "- " but is not a
-# well-formed entry (no second ':', or an empty slug) gates nothing either, and
-# that is exactly why fm_closed_malformed reports it: a typo'd closure would
-# otherwise disarm the gate while the captain believes the topic is closed, which
-# is a control going quiet at the moment it has failed.
+# well-formed entry gates nothing either, and that is exactly why
+# fm_closed_malformed reports it: a typo'd closure would otherwise disarm the gate
+# while the captain believes the topic is closed, which is a control going quiet at
+# the moment it has failed.
+#
+# An entry is well-formed only when it can actually fire: two ':' separators, a
+# non-empty slug, AND a keyword list holding at least one keyword that survives
+# normalization. "- topic:: why" and "- topic: ---: why" are each one typo away from
+# a real closure and match NOTHING, so they are malformed rather than closures -
+# otherwise fm_closed_slugs would list them and bootstrap would positively report a
+# topic as closed while the gate covered none of it, which is worse than silence.
+# A bullet that is indented ("  - slug: kw: why", a nested markdown list item) is not
+# an entry either: fm_closed_match only reads lines starting at column one, so an
+# indented bullet closes nothing and is reported instead of skipped.
 #
 # MATCHING RULE (stated here because a gate whose rule is not written down is a
 # gate nobody can predict):
-#   1. Both the haystack (task id + the brief with fm-brief.sh's marked boilerplate
-#      regions stripped, see fm_closed_haystack_body) and each keyword are normalized:
+#   1. Both the haystack (task id + the brief minus the regions fm-brief.sh both
+#      marked AND opened with a generated heading, see fm_closed_haystack_body) and
+#      each keyword are normalized:
 #      lowercased, then every character outside [a-z0-9] - punctuation, hyphens,
 #      underscores, newlines - becomes a space, and runs of spaces collapse to
 #      one. So "post-deletion", "Post Deletion", "post_deletion" and a phrase
@@ -67,34 +78,49 @@ fm_closed_entry_field() {
   esac
 }
 
+# fm_closed_entry_valid <line>: 0 when the line is a closure that can actually fire.
+# Every consumer asks this one question, so "listed as closed", "not warned about",
+# and "able to match" can never disagree about the same line.
+fm_closed_entry_valid() {
+  local line=$1 slug keywords
+  slug=$(fm_closed_entry_field "$line" slug) || return 1
+  keywords=$(fm_closed_entry_field "$line" keywords) || return 1
+  slug=$(printf '%s' "$slug" | tr -d '[:space:]')
+  [ -n "$slug" ] || return 1
+  # Normalization turns the separators into spaces too, so an empty result means no
+  # individual keyword in the list could ever match either.
+  keywords=$(printf '%s' "$keywords" | fm_closed_normalize | tr -d ' ')
+  [ -n "$keywords" ] || return 1
+  return 0
+}
+
 # fm_closed_slugs <register>: print each well-formed entry's slug, one per line.
 # Silent (and exit 0) when the register is absent or holds no entries.
 fm_closed_slugs() {
-  local register=$1 line slug
+  local register=$1 line
   [ -f "$register" ] || return 0
   while IFS= read -r line || [ -n "$line" ]; do
-    slug=$(fm_closed_entry_field "$line" slug) || continue
-    slug=$(printf '%s' "$slug" | tr -d '[:space:]')
-    [ -n "$slug" ] && printf '%s\n' "$slug"
+    fm_closed_entry_valid "$line" || continue
+    printf '%s\n' "$(fm_closed_entry_field "$line" slug | tr -d '[:space:]')"
   done < "$register"
 }
 
-# fm_closed_malformed <register>: print every "- " line that is NOT a well-formed
-# entry, one per line, verbatim. Comments, blank lines, and prose that does not
-# start with "- " stay silent, because those are notes rather than attempted
+# fm_closed_malformed <register>: print every attempted-bullet line that is NOT a
+# well-formed entry, one per line, verbatim. An attempted bullet is any line whose
+# first non-space characters are "- ", so an indented bullet is reported too: it
+# looks like a closure and closes nothing. Comments, blank lines, and prose that
+# does not start a bullet stay silent, because those are notes rather than attempted
 # closures. Silent (and exit 0) when the register is absent.
 fm_closed_malformed() {
-  local register=$1 line slug
+  local register=$1 line trimmed
   [ -f "$register" ] || return 0
   while IFS= read -r line || [ -n "$line" ]; do
-    case "$line" in
+    trimmed=$(printf '%s' "$line" | sed 's/^[[:space:]]*//')
+    case "$trimmed" in
       '- '*) : ;;
       *) continue ;;
     esac
-    if slug=$(fm_closed_entry_field "$line" slug); then
-      slug=$(printf '%s' "$slug" | tr -d '[:space:]')
-      [ -n "$slug" ] && continue
-    fi
+    fm_closed_entry_valid "$line" && continue
     printf '%s\n' "$line"
   done < "$register"
 }
@@ -105,29 +131,52 @@ fm_closed_malformed() {
 FM_CLOSED_BOILERPLATE_START='<!-- fm:boilerplate start -->'
 FM_CLOSED_BOILERPLATE_END='<!-- fm:boilerplate end -->'
 
-# fm_closed_marker_status <brief-file>: print "<state> <count>" where state is
+# The openers every block fm-brief.sh injects begins with: the crewmate preamble
+# line, and the headings of the generated sections. A marked region is dropped from
+# the haystack only when it starts with one of these, so the marker and the text
+# have to AGREE before any task content can be lost. Keep in step with fm-brief.sh;
+# a heading renamed there and not here keeps MORE text, which is the loud direction.
+FM_CLOSED_INJECTED_OPENERS='You are a crewmate:|# Engineering conventions|# Setup|# Rules|# Freshness provenance|# Access and routing|## Fleet access map|# Project memory|# Definition of done'
+
+# fm_closed_marker_status <brief-file>: print "<state> <stripped> <kept>" where state is
 #   none        the file carries no boilerplate markers at all
-#   ok          every marker is balanced and non-nested; count is the region count
+#   ok          every marker is balanced and non-nested; <stripped> counts the regions
+#               that also open with an injected heading and are therefore dropped,
+#               <kept> counts the marked regions that do not and are therefore kept
 #   unbalanced  a start with no end, an end with no start, or a nested start
 fm_closed_marker_status() {
   local brief=$1
   if [ ! -f "$brief" ]; then
-    printf 'none 0\n'
+    printf 'none 0 0\n'
     return 0
   fi
-  awk -v s="$FM_CLOSED_BOILERPLATE_START" -v e="$FM_CLOSED_BOILERPLATE_END" '
+  awk -v s="$FM_CLOSED_BOILERPLATE_START" -v e="$FM_CLOSED_BOILERPLATE_END" \
+      -v openers="$FM_CLOSED_INJECTED_OPENERS" '
+    function trim(t) { sub(/^[ \t]+/, "", t); sub(/[ \t\r]+$/, "", t); return t }
+    function generated(t,   i, n, o) {
+      if (t == "") return 0
+      n = split(openers, o, "[|]")
+      for (i = 1; i <= n; i++) if (index(t, o[i]) == 1) return 1
+      return 0
+    }
     {
-      line = $0
-      sub(/^[ \t]+/, "", line)
-      sub(/[ \t\r]+$/, "", line)
-      if (line == s) { seen++; if (open) bad = 1; open = 1; starts++ }
-      else if (line == e) { seen++; if (!open) bad = 1; open = 0 }
+      line = trim($0)
+      if (line == s) { seen++; if (open) bad = 1; open = 1; first = ""; next }
+      if (line == e) {
+        seen++
+        if (!open) bad = 1
+        else if (generated(first)) stripped++
+        else kept++
+        open = 0
+        next
+      }
+      if (open && first == "" && line != "") first = line
     }
     END {
       if (open) bad = 1
-      if (!seen) { print "none 0"; exit }
-      if (bad) { print "unbalanced " starts; exit }
-      print "ok " starts
+      if (!seen) { print "none 0 0"; exit }
+      if (bad) { print "unbalanced 0 0"; exit }
+      print "ok " stripped + 0 " " kept + 0
     }
   ' "$brief"
 }
@@ -141,12 +190,19 @@ fm_closed_marker_status() {
 # in any of that would match EVERY brief and refuse EVERY dispatch, and a gate that
 # refuses everything is worse than the problem it solves.
 #
-# BOUNDARIES COME FROM EXPLICIT MARKERS, NEVER FROM HEADING TEXT, and that is the
-# whole design. A task body is free text firstmate writes, so it can contain any
-# heading a brief uses - a task about editing the brief scaffold quotes "# Setup" -
-# and a stripper keyed on heading text would then drop the rest of the task from the
-# haystack, silently covering less than the captain believes. That failure is
-# invisible, and it is exactly what this gate exists to prevent.
+# A REGION IS DROPPED ONLY WHEN TWO INDEPENDENT SIGNALS AGREE: fm-brief.sh's explicit
+# markers wrap it, AND its first non-blank line is one of the openers fm-brief.sh
+# generates (FM_CLOSED_INJECTED_OPENERS). Neither signal alone is enough, and the
+# history of this gate is why:
+#   - heading text alone had an unbounded collision space. A task body is free text,
+#     so a task about editing the brief scaffold quotes "# Setup" verbatim, and
+#     everything after it stopped being matched: a closure silently covering less
+#     than the captain believes, with no signal anywhere.
+#   - markers alone left the mirror-image hole. A task that quotes the marker pair in
+#     a fenced block - again, ordinary work in THIS repo - had the quoted region
+#     silently dropped.
+# Requiring agreement means any disagreement between the two keeps MORE text and says
+# so out loud, which is the only direction that fails safe.
 #
 # Narrowing is therefore allowed only where it is CERTAIN, and every uncertain case
 # keeps MORE text rather than less:
@@ -154,28 +210,54 @@ fm_closed_marker_status() {
 #     landed): the WHOLE file is the haystack. There is no heading-text fallback.
 #   - unbalanced or nested markers: the WHOLE file is the haystack AND a warning
 #     names the brief, because confidence is the precondition for dropping anything.
-#   - a marker fm-brief.sh stops emitting: MORE text is matched, so the worst case is
-#     a false refusal, which is loud, visible to whoever ran the spawn, and undone
-#     with one flag.
-# Do not "simplify" this back into a heading-text stripper or a task-section extractor.
+#   - a marked region that does not open with a generated heading: that region is
+#     KEPT and a warning names the brief.
+#   - a marker or heading fm-brief.sh stops emitting: MORE text is matched, so the
+#     worst case is a false refusal, which is loud, visible to whoever ran the spawn,
+#     and undone with one flag.
+# Do not "simplify" this back into a heading-text stripper, a marker-only stripper,
+# or a task-section extractor.
 #
 # Set FM_CLOSED_EXPLAIN=1 on a spawn to see the exact haystack this produced and how
 # many marked regions it removed.
 fm_closed_haystack_body() {
-  local brief=$1 status state
+  local brief=$1 status state stripped kept
   [ -f "$brief" ] || return 0
   status=$(fm_closed_marker_status "$brief")
-  state=${status%% *}
+  read -r state stripped kept <<EOF
+$status
+EOF
   case "$state" in
     ok)
-      awk -v s="$FM_CLOSED_BOILERPLATE_START" -v e="$FM_CLOSED_BOILERPLATE_END" '
+      if [ "${kept:-0}" -gt 0 ]; then
         {
-          line = $0
-          sub(/^[ \t]+/, "", line)
-          sub(/[ \t\r]+$/, "", line)
-          if (line == s) { dropping = 1; next }
-          if (line == e) { dropping = 0; next }
-          if (!dropping) print
+          echo "warning: $brief has $kept fm:boilerplate marked region(s) that do not begin with a"
+          echo "  section bin/fm-brief.sh generates, so they cannot be confidently identified as"
+          echo "  injected boilerplate. Keeping them in the closed-topic haystack, which may refuse"
+          echo "  a spawn that a correctly generated brief would not."
+        } >&2
+      fi
+      awk -v s="$FM_CLOSED_BOILERPLATE_START" -v e="$FM_CLOSED_BOILERPLATE_END" \
+          -v openers="$FM_CLOSED_INJECTED_OPENERS" '
+        function trim(t) { sub(/^[ \t]+/, "", t); sub(/[ \t\r]+$/, "", t); return t }
+        function generated(t,   i, n, o) {
+          if (t == "") return 0
+          n = split(openers, o, "[|]")
+          for (i = 1; i <= n; i++) if (index(t, o[i]) == 1) return 1
+          return 0
+        }
+        {
+          line = trim($0)
+          if (line == s) { open = 1; nb = 0; first = ""; buf[nb++] = $0; next }
+          if (line == e) {
+            buf[nb++] = $0
+            if (!generated(first)) for (i = 0; i < nb; i++) print buf[i]
+            open = 0
+            nb = 0
+            next
+          }
+          if (open) { buf[nb++] = $0; if (first == "" && line != "") first = line; next }
+          print
         }
       ' "$brief"
       ;;
@@ -206,10 +288,9 @@ fm_closed_match() {
   [ -f "$haystack_file" ] || return 1
   hay=" $(fm_closed_normalize < "$haystack_file") "
   while IFS= read -r line || [ -n "$line" ]; do
-    slug=$(fm_closed_entry_field "$line" slug) || continue
-    keywords=$(fm_closed_entry_field "$line" keywords) || continue
-    slug=$(printf '%s' "$slug" | tr -d '[:space:]')
-    [ -n "$slug" ] || continue
+    fm_closed_entry_valid "$line" || continue
+    slug=$(fm_closed_entry_field "$line" slug | tr -d '[:space:]')
+    keywords=$(fm_closed_entry_field "$line" keywords)
     # Split the comma-separated keyword list with parameter expansion only: no IFS
     # juggling and no arrays, so the walk behaves the same on bash 3.2 (macOS).
     rest=$keywords

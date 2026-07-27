@@ -32,17 +32,22 @@ One entry per line:
 - <slug>: <comma-separated keywords>: <one-line why> (closed <date>)
 ```
 
-Blank lines, `#` comments, and prose that does not start with `- ` are ignored.
-A line that starts with `- ` but is not a well-formed entry (no second `:`, or an empty slug) closes nothing, and is reported rather than silently skipped: `bin/fm-spawn.sh` warns to stderr without blocking the spawn, and bootstrap prints one `CLOSED_TOPICS_MALFORMED:` line naming the offending line.
+Blank lines, `#` comments, and prose that does not start a bullet are ignored.
+A bullet that is not a well-formed entry closes nothing, and is reported rather than silently skipped: `bin/fm-spawn.sh` warns to stderr without blocking the spawn, and bootstrap prints one `CLOSED_TOPICS_MALFORMED:` line naming the offending line.
+An entry is well-formed only when it can actually fire: both `:` separators, a non-empty slug, a keyword list holding at least one keyword that survives normalization (`- topic:: why` and `- topic: ---: why` do not), and a bullet starting at column one (an indented bullet is never matched).
+An entry with no usable keyword is therefore reported as malformed and left out of the `CLOSED_TOPICS:` count, rather than counted as a closure the gate can never fire on.
 A silent skip would leave the captain believing a topic is closed while the gate had quietly stopped covering it.
 
 Matching normalizes case and punctuation and requires whole-token phrase hits, so `post-deletion`, `Post Deletion`, and a phrase wrapped across a line break all match, while `billings` does not match `billing`.
 Breadth is the operator's lever: a one-word generic keyword blocks unrelated work that merely mentions it, so entries should carry specific multi-word phrases.
 The haystack is the task id plus the brief with `bin/fm-brief.sh`'s injected boilerplate stripped out (conventions, setup, rules, freshness, access and routing, fleet access map, project memory, definition of done), so a keyword that happens to appear in that boilerplate cannot refuse the whole fleet's dispatch.
-Those regions are identified by the explicit `<!-- fm:boilerplate start -->` / `<!-- fm:boilerplate end -->` markers the scaffold emits around each block it injects, never by heading text, so everything outside them stays matched: a task body is free text and may legitimately carry its own `# ` headings, fenced snippets, or a verbatim quote of a generated heading such as `# Setup`.
-Both uncertain cases keep the whole brief rather than dropping any of it: a brief with no markers at all (hand-written, or generated before markers existed) is matched whole with no heading-text fallback, and a brief whose markers do not balance is matched whole and reported on stderr.
+A region is dropped only when two independent signals agree: the explicit `<!-- fm:boilerplate start -->` / `<!-- fm:boilerplate end -->` markers the scaffold emits around each block it injects wrap it, AND its first non-blank line opens one of the sections the scaffold generates.
+Neither signal alone is enough, because either alone drops task content: heading text alone stops matching at a task body that quotes a generated heading such as `# Setup`, and markers alone drop a task body that quotes the marker pair in a fenced block.
+Everything else stays matched, including a task body's own `# ` headings, fenced snippets, and quoted markers.
+Every uncertain case keeps the whole region or the whole brief rather than dropping any of it: a brief with no markers at all (hand-written, or generated before markers existed) is matched whole with no heading-text fallback, a brief whose markers do not balance is matched whole and reported on stderr, and a marked region that does not open with a generated section is kept and reported on stderr.
 Narrowing therefore fails toward a loud false refusal, undone with one flag, rather than toward a closure silently covering less than the captain believes.
-Set `FM_CLOSED_EXPLAIN=1` on a spawn to print the exact haystack the gate matched and how many marked regions were stripped.
+Set `FM_CLOSED_EXPLAIN=1` on a spawn to print the exact haystack the gate matched, how many marked regions were stripped, and how many were kept because they were not recognisable.
+A ship or scout spawn whose brief still carries the scaffold's unreplaced `{TASK}` placeholder refuses with exit 4 before this gate runs, because an unfilled brief would leave the closure check with nothing to match.
 `--reopen-closed` is the one authorised bypass; it records `reopened_closed=<slug>` in the task's meta and is refused in batch dispatch, so one captain-authorised reopen never widens into a blanket bypass for every pair.
 
 ## Fleet access map (data/access.md)
@@ -176,7 +181,7 @@ FM_CHECK_INTERVAL=300   # seconds between slow checks (merge polls or the X-mode
 FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh
 FM_CREW_STATE_BIN=bin/fm-crew-state.sh   # test override for the current-state reader used by provably-working watcher triage
-FM_CLOSED_EXPLAIN=      # truthy makes a spawn print, on stderr, the exact haystack the closed-topic gate matched and how many marked boilerplate regions were stripped from the brief; diagnostic only, it never changes the verdict
+FM_CLOSED_EXPLAIN=      # truthy makes a spawn print, on stderr, the exact haystack the closed-topic gate matched, how many marked boilerplate regions were stripped from the brief, and how many were kept as unrecognisable; diagnostic only, it never changes the verdict
 FM_KEEP_MODEL_ENV=      # truthy keeps the model-selection env family at agent launch instead of stripping it, for Bedrock/Vertex setups that select the model that way; read from the environment only, never from this home's .env, so set it where every firstmate home inherits it (a shell profile or the tmux environment, the same place those model variables are set), because a launched pane inherits the tmux session environment rather than the environment of the process that ran fm-spawn, so setting it only in one agent's own process environment never reaches a secondmate or the crewmates that secondmate spawns
 FMX_PAIRING_TOKEN=      # X mode pairing token; .env opt-in authorizes replies and eligible lifecycle actions
 FMX_RELAY_URL=https://myfirstmate.io   # optional X relay override, mainly for local relay development

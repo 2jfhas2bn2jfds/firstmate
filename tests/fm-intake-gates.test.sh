@@ -639,6 +639,163 @@ this prose line must stay silent' > "$home/data/closed.md"
   pass "gate 2: a malformed register line is warned about by name, while comments and prose stay silent"
 }
 
+# An entry whose keyword list is empty or normalizes to nothing is the worst shape a
+# register can take: it passes for well-formed, so it would be listed as a closed slug
+# and reported by bootstrap as closed, while matching NOTHING. The captain reads the
+# slug and believes the topic is dead while the gate is disarmed. So it is malformed:
+# warned by name, and never counted as a live closure. An indented bullet closes
+# nothing either, because matching only reads bullets at column one.
+test_closed_empty_keyword_entry_is_malformed() {
+  local home wt out status line
+  read -r home wt <<EOF
+$(spawnable_home closed-emptykw)
+EOF
+  printf '%s\n' \
+'- billing-topic:: the captain closed this (closed 2026-07-27)
+- spacing-topic: : also closed (closed 2026-07-27)
+- punctuation-topic: ---: also closed (closed 2026-07-27)
+  - indented-topic: deleted user backlog: closed by the captain (closed 2026-07-25)
+- good-topic: deleted user backlog: closed by the captain (closed 2026-07-25)' \
+    > "$home/data/closed.md"
+
+  # Work naming every disarmed entry's own subject must not be refused by them, and
+  # the register must say so out loud instead of presenting them as closures.
+  write_brief "$home" emptykw-p1 'Review the billing spacing and punctuation of the indented invoice screen.'
+  out=$(run_spawnable "$home" "$wt" emptykw-p1 projects/alpha codex --why captain)
+  status=$?
+  expect_code 0 "$status" "an entry that closes nothing still blocked a spawn (got: $out)"
+  assert_contains "$out" "NOT well-formed closures" "an entry with no usable keyword warned about nothing"
+  for line in '- billing-topic::' '- spacing-topic: :' '- punctuation-topic: ---:' '- indented-topic:'; do
+    assert_contains "$out" "$line" "the warning did not name the offending line '$line'"
+  done
+  assert_not_contains "$out" "- good-topic:" "a usable entry was reported as malformed"
+
+  # Positive control on the SAME register: the one entry that CAN fire still refuses,
+  # so the assertions above are not passing because the gate stopped working.
+  write_brief "$home" emptykw-p2 'Work the deleted user backlog until it drains.'
+  out=$(run_spawnable "$home" "$wt" emptykw-p2 projects/alpha codex --why captain)
+  status=$?
+  expect_code 3 "$status" "positive control: the one usable entry did not refuse"
+  assert_contains "$out" "- good-topic: deleted user backlog:" "the closure line was not printed verbatim"
+  assert_absent "$home/state/emptykw-p2.meta" "a refused spawn still wrote meta"
+  pass "gate 2: an entry with no usable keyword is malformed and loud, never a silent closure"
+}
+
+# Markers alone are not enough to drop text, because a task in THIS repo legitimately
+# quotes the marker pair when it is about the brief scaffold. So a region is dropped
+# only when the marker and the text AGREE: marked AND opening with a section
+# fm-brief.sh generates. A marked region that opens with anything else is kept and
+# reported, because keeping more is recoverable and dropping task content is not.
+test_closed_quoted_markers_in_task_body_still_match() {
+  local home wt out status brief body id label verdict n=0
+  read -r home wt <<EOF
+$(spawnable_home closed-quoted-markers)
+EOF
+  printf -- '- Sentry: MCP-backed. reach: probe first.\n' > "$home/data/access.md"
+  printf '%s\n' \
+'- sentry-topic: Sentry: handled by the captain out of band (closed 2026-07-27)
+- deleted-user-backlog: deleted user backlog: closed by the captain (closed 2026-07-25)' \
+    > "$home/data/closed.md"
+
+  body="$TMP_ROOT/closed-quoted-markers-body"
+  while IFS='|' read -r label verdict; do
+    [ -n "$label" ] || continue
+    n=$((n + 1))
+    id="quoted-r$n"
+    case "$n" in
+      1) # a task about the scaffold, quoting a balanced marker pair in a fenced block
+        printf '%s\n' 'Document what the scaffold emits, e.g.:' '' '```' \
+          '<!-- fm:boilerplate start -->' \
+          'quoted sample text about the deleted user backlog' \
+          '<!-- fm:boilerplate end -->' '```' > "$body" ;;
+      2) # same shape, no closed keyword anywhere but the injected access map
+        printf '%s\n' 'Document what the scaffold emits, e.g.:' '' '```' \
+          '<!-- fm:boilerplate start -->' \
+          'quoted sample text about notification preferences' \
+          '<!-- fm:boilerplate end -->' '```' > "$body" ;;
+    esac
+    FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
+      FM_STATE_OVERRIDE="$home/state" "$BRIEF_SH" "$id" alpha >/dev/null 2>&1
+    brief="$home/data/$id/brief.md"
+    fill_task "$brief" "$body"
+    assert_grep "quoted sample text" "$brief" "$id: the task body lost its quoted region"
+    out=$(run_spawnable "$home" "$wt" "$id" projects/alpha codex --why captain)
+    status=$?
+    assert_contains "$out" "marked region(s) that do not begin with a" \
+      "$label: an unrecognised marked region was dropped without a word"
+    case "$verdict" in
+      match)
+        expect_code 3 "$status" "$label"
+        assert_contains "$out" "- deleted-user-backlog: deleted user backlog:" \
+          "$label: the closure line was not printed verbatim"
+        assert_absent "$home/state/$id.meta" "$label: a refused spawn still wrote meta"
+        ;;
+      nomatch)
+        expect_code 0 "$status" "$label: unrelated work was blocked (got: $out)"
+        assert_present "$home/state/$id.meta" "$label: unrelated work did not spawn"
+        ;;
+    esac
+  done <<'ROWS'
+a closure phrase inside a task-quoted marker pair still refuses|match
+control: the same quoted shape with no closed keyword still spawns|nomatch
+ROWS
+
+  # Control that the recognised regions are still dropped and the warning is not
+  # simply always on: an ordinary generated brief spawns silently, even though the
+  # closure keyword sits in its injected fleet access map.
+  FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
+    FM_STATE_OVERRIDE="$home/state" "$BRIEF_SH" quoted-r3 alpha >/dev/null 2>&1
+  perl -0pi -e 's/\{TASK\}/Add a settings screen for notification preferences./' \
+    "$home/data/quoted-r3/brief.md"
+  out=$(run_spawnable "$home" "$wt" quoted-r3 projects/alpha codex --why captain)
+  status=$?
+  expect_code 0 "$status" "control: an ordinary generated brief was refused (got: $out)"
+  assert_not_contains "$out" "marked region(s) that do not begin with a" \
+    "control: a correctly generated brief was reported as unrecognisable"
+  pass "gate 2: a marked region is dropped only when its opening agrees, and says so otherwise"
+}
+
+# The one gate that is supposed to be un-talk-past-able must not go vacuous on a brief
+# nobody filled in: an unreplaced {TASK} placeholder leaves gate 2 with an essentially
+# empty haystack, so the closure check would pass without having checked anything.
+# Refused with its own exit code, distinct from the why (2) and closed (3) refusals.
+test_unfilled_brief_refuses() {
+  local home wt out status kind id
+  read -r home wt <<EOF
+$(spawnable_home unfilled-brief)
+EOF
+  printf -- '- deleted-user-backlog: deleted user backlog: closed by the captain (closed 2026-07-25)\n' \
+    > "$home/data/closed.md"
+  for kind in ship scout; do
+    id="unfilled-$kind"
+    if [ "$kind" = scout ]; then
+      FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
+        FM_STATE_OVERRIDE="$home/state" "$BRIEF_SH" "$id" alpha --scout >/dev/null 2>&1
+      out=$(run_spawnable "$home" "$wt" "$id" projects/alpha codex --why captain --scout)
+    else
+      FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
+        FM_STATE_OVERRIDE="$home/state" "$BRIEF_SH" "$id" alpha >/dev/null 2>&1
+      out=$(run_spawnable "$home" "$wt" "$id" projects/alpha codex --why captain)
+    fi
+    status=$?
+    expect_code 4 "$status" "$kind: an unfilled brief spawned anyway (got: $out)"
+    assert_contains "$out" "the brief was never filled in" "$kind: the refusal does not say what is wrong"
+    assert_contains "$out" "$home/data/$id/brief.md" "$kind: the refusal does not name the brief"
+    assert_absent "$home/state/$id.meta" "$kind: a refused spawn still wrote meta"
+  done
+
+  # Positive control: the same scaffolded brief, filled in, spawns as before.
+  FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
+    FM_STATE_OVERRIDE="$home/state" "$BRIEF_SH" unfilled-ok alpha >/dev/null 2>&1
+  perl -0pi -e 's/\{TASK\}/Add a settings screen for notification preferences./' \
+    "$home/data/unfilled-ok/brief.md"
+  out=$(run_spawnable "$home" "$wt" unfilled-ok projects/alpha codex --why captain)
+  status=$?
+  expect_code 0 "$status" "control: a filled brief was refused (got: $out)"
+  assert_present "$home/state/unfilled-ok.meta" "control: a filled brief did not spawn"
+  pass "spawn: a brief still carrying the {TASK} placeholder refuses with its own exit code"
+}
+
 # An absent register is inert: no closure, no error, no behavior change.
 test_closed_absent_register() {
   local home wt out status
@@ -877,6 +1034,18 @@ SH
   assert_not_contains "$out" "CLOSED_TOPICS_MALFORMED: closes nothing, fix or remove: this prose line" \
     "bootstrap reported a prose line as malformed"
 
+  # An entry with no usable keyword must not be COUNTED as closed: reporting a slug
+  # the gate can never fire on tells the captain a topic is dead while it is live.
+  printf '%s\n' \
+'- billing-topic:: the captain closed this (closed 2026-07-27)
+- good-topic: deleted user backlog: closed by the captain (closed 2026-07-25)' \
+    > "$home/data/closed.md"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" TMUX='' "$BOOTSTRAP")
+  assert_contains "$out" "CLOSED_TOPICS_MALFORMED: closes nothing, fix or remove: - billing-topic::" \
+    "bootstrap did not name an entry whose keyword list closes nothing"
+  assert_contains "$out" "CLOSED_TOPICS: 1 closed at intake: good-topic" \
+    "bootstrap counted an entry that closes nothing as a live closure"
+
   # Positive control for that absence: a clean register reports the count and no
   # malformed line at all.
   printf -- '- good-topic: deleted user backlog: closed by the captain (closed 2026-07-25)\n' \
@@ -901,6 +1070,9 @@ test_closed_matches_task_body_after_hash_line
 test_closed_marker_fallbacks_keep_whole_brief
 test_closed_explain_shows_the_haystack
 test_closed_malformed_line_is_loud
+test_closed_empty_keyword_entry_is_malformed
+test_closed_quoted_markers_in_task_body_still_match
+test_unfilled_brief_refuses
 test_closed_absent_register
 test_meta_records_provenance
 test_brief_freshness_section

@@ -44,6 +44,10 @@
 # closed-topic gate can subtract generated text from its haystack by exact marker
 # instead of by heading text a task body may legitimately quote
 # (see bin/fm-closed-lib.sh). Anything outside those markers is task-specific.
+# The gate drops a marked region only when it ALSO opens with one of the section
+# openers listed in FM_CLOSED_INJECTED_OPENERS, so a task body that quotes the marker
+# pair keeps its text; renaming a heading below without updating that list keeps the
+# region in the haystack, which is the safe direction but worth fixing.
 # Refuses to overwrite an existing brief.
 set -eu
 

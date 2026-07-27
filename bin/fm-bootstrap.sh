@@ -435,9 +435,12 @@ liveness_daemon_ensure() {
 # rather than only surfacing as a refusal later. Silent when the register is absent
 # or holds no entries: bootstrap's contract is that silence means all good.
 #
-# A "- " line that is not a well-formed entry is NOT all good: it closes nothing
-# while looking like a closure, so it is reported line by line rather than skipped.
-# The count of well-formed slugs cannot show that, because nobody counts.
+# A bullet that is not a well-formed entry is NOT all good: it closes nothing while
+# looking like a closure, so it is reported line by line rather than skipped. The
+# count of well-formed slugs cannot show that, because nobody counts. An entry whose
+# keyword list is empty or normalizes to nothing is one of those: it would otherwise
+# be counted in the CLOSED_TOPICS line, positively telling the captain a topic is
+# closed while the gate covered none of it.
 closed_topics_report() {
   local register="$DATA/closed.md" slugs malformed count
   [ -f "$register" ] || return 0
