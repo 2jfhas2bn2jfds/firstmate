@@ -23,7 +23,11 @@
 #     and bootstrap's silence-means-all-good contract depends on that staying so.
 #   - a SECONDMATE home that cannot resolve the main home has a BROKEN control, not
 #     an empty one: every ship and scout spawn from it warns on stderr naming what
-#     could not be resolved, and its bootstrap reports the same.
+#     could not be resolved, and its bootstrap reports the same. A pointer target
+#     that is merely an enterable directory is one of those failures, not a
+#     resolution: it has to look like a main firstmate home.
+#   - a SECONDMATE home holding a register of its OWN is reported too. It is never
+#     read, so it is a closure the captain believes is set and that does not exist.
 # It does not refuse. Failing closed on every dispatch is its own outage, and the
 # rest of this repo proceeds loudly rather than stopping the fleet on degraded
 # state.
@@ -97,6 +101,29 @@ fm_primary_home() {
     printf '%s names the secondmate home itself, so there is no main home to read\n' "$pointer"
     return 1
   fi
+  # "A directory that can be entered" is NOT a resolved pointer. Pointed at the main
+  # home's PARENT, at an unrelated path, or at another secondmate home, the pointer
+  # would resolve happily to a <target>/data/closed.md that does not exist - and an
+  # absent register reads as "no closures set", so the gate would go inert with
+  # nothing said anywhere. That is the one failure shape every other check here
+  # exists to prevent, so a target that does not look like a MAIN firstmate home
+  # takes the same loud unresolved path rather than falling through it.
+  if fm_is_secondmate_home "$abs_target"; then
+    printf '%s names %s, which is itself a secondmate home; the fleet registers live in the MAIN firstmate home\n' "$pointer" "$abs_target"
+    return 1
+  fi
+  if [ ! -f "$abs_target/AGENTS.md" ]; then
+    printf '%s names %s, which is not a firstmate home (missing AGENTS.md)\n' "$pointer" "$abs_target"
+    return 1
+  fi
+  if [ ! -d "$abs_target/bin" ]; then
+    printf '%s names %s, which is not a firstmate home (missing bin/)\n' "$pointer" "$abs_target"
+    return 1
+  fi
+  if [ ! -d "$abs_target/data" ]; then
+    printf '%s names %s, which is not a firstmate home (missing data/)\n' "$pointer" "$abs_target"
+    return 1
+  fi
   printf '%s\n' "$abs_target"
 }
 
@@ -114,6 +141,41 @@ fm_fleet_register() {
   fi
   primary=$(fm_primary_home "$home") || { printf '%s\n' "$primary"; return 1; }
   printf '%s/data/%s\n' "$primary" "$name"
+}
+
+# fm_fleet_shadow_register <home> <local-data-dir> <basename>: print the path of a
+# fleet register that <home> keeps LOCALLY and that is therefore never read, or
+# nothing. Only a secondmate home can have one.
+#
+# A secondmate is a firstmate running the same AGENTS.md, and section 7's "add a
+# closure line when the captain closes a topic" does not name a home at the point of
+# action, so a captain closing a topic while steering a lead will naturally write it
+# into that lead's own data/. That file enforces nothing and is never read: a closure
+# the captain believes is set and that does not exist. It is not deleted and not
+# honoured (one register is the design), it is reported, so the operator is told where
+# the line belongs.
+fm_fleet_shadow_register() {
+  local home=$1 data=$2 name=$3
+  fm_is_secondmate_home "$home" || return 0
+  [ -f "$data/$name" ] || return 0
+  printf '%s/%s\n' "$data" "$name"
+}
+
+# fm_fleet_shadow_warning <shadow-path> <basename> <fleet-register-or-empty>: the loud
+# stderr block for a local register that is ignored.
+fm_fleet_shadow_warning() {
+  local shadow=$1 name=$2 register=$3
+  {
+    echo "warning: $shadow is IGNORED."
+    echo "  data/$name is fleet-wide and lives in the MAIN firstmate home; this"
+    echo "  secondmate home keeps no register of its own, so nothing in this file is"
+    echo "  enforced anywhere."
+    if [ -n "$register" ]; then
+      echo "  Move these lines into $register."
+    else
+      echo "  Move these lines into the main firstmate home's data/$name."
+    fi
+  } >&2
 }
 
 # fm_fleet_register_warning <home> <basename> <reason>: the loud stderr block for an

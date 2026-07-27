@@ -27,6 +27,8 @@ Personal preferences for one captain's fleet live locally in `data/captain.md`; 
 Topics the captain has closed live locally in `data/closed.md`; it is gitignored, because closures are captain-specific while the gate that enforces them is shared.
 `bin/fm-spawn.sh` matches every ship and scout spawn against it and refuses with exit 3 before any window or meta exists, printing the matching closure line verbatim; bootstrap reports the closed slugs once per session as `CLOSED_TOPICS:`.
 The register is fleet-wide and lives in the main firstmate home: a secondmate home keeps no copy of its own and reads that one file through its `config/primary-home` pointer, so a closure is enforced everywhere work is dispatched rather than only where the captain typed it (see [Fleet home pointer](#fleet-home-pointer-configprimary-home)).
+A closure written into a secondmate home's own `data/closed.md` is therefore never read, and that is reported rather than left to look like it took effect: every ship and scout spawn from that home warns on stderr naming the ignored file, and its bootstrap prints one `CLOSED_TOPICS_LOCAL_IGNORED:` line pointing at the register it does not override.
+Move those lines into the main home's register; the local file is neither deleted nor honoured.
 One entry per line:
 
 ```markdown
@@ -58,13 +60,16 @@ What access this fleet has, where it lives, and how a crew reaches it lives loca
 There is no required format; keep it a short list per capability and mark firstmate-only capabilities explicitly, since crew reach varies by harness and pane.
 The file is optional: when it is absent the structural probe-then-escalate section still ships, because the half that always applies is the routing rule rather than the inventory.
 Like the closed-topic register it is fleet-wide and lives in the main firstmate home; a secondmate home reads it through the same `config/primary-home` pointer, so the crews a secondmate spawns get the captain's map rather than an empty inventory.
+A map written into a secondmate home's own `data/access.md` reaches no brief, so brief generation there warns on stderr naming the ignored file instead of letting it look applied.
 
 ## Fleet home pointer (config/primary-home)
 
 A secondmate home records the main firstmate home's absolute path in `config/primary-home`; it is local and gitignored, written by `bin/fm-home-seed.sh` at seed time and rewritten by `bin/fm-spawn.sh <id> --secondmate` on every launch, so a moved or re-registered home converges instead of running on with a control it cannot reach.
 It is a pointer rather than a copy of the fleet registers on purpose: a copy drifts, and a stale copy is a closure that silently expires.
 A main firstmate home has no pointer and no marker file, and reads its own `data/`.
-When a secondmate home cannot resolve it (no pointer recorded, empty, relative, a symlink, or naming a directory that does not exist), the closed-topic gate there is broken rather than empty, so it is loud: every ship and scout spawn from that home warns on stderr naming what could not be resolved, brief generation warns the same way about the access map, and that home's bootstrap prints `CLOSED_TOPICS_UNRESOLVED: <reason>`.
+The recorded path has to be a main firstmate home, not merely a directory that exists: a target carrying the secondmate marker, or missing `AGENTS.md`, `bin/`, or `data/`, is rejected like any other broken pointer.
+Otherwise a pointer aimed at the main home's parent or at an unrelated path would resolve to a register file that does not exist, and an absent register reads as "no closures set", which is the gate going inert with nothing said.
+When a secondmate home cannot resolve it (no pointer recorded, empty, relative, a symlink, naming a directory that does not exist, naming the home itself, or naming something that is not a main firstmate home), the closed-topic gate there is broken rather than empty, so it is loud: every ship and scout spawn from that home warns on stderr naming what could not be resolved, brief generation warns the same way about the access map, and that home's bootstrap prints `CLOSED_TOPICS_UNRESOLVED: <reason>`.
 It warns and proceeds rather than refusing, because failing closed on every dispatch from that home would be its own outage.
 
 ## Secondmate routes (data/secondmates.md)

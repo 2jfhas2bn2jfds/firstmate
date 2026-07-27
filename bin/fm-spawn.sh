@@ -21,8 +21,10 @@
 #   verbatim. The register is fleet-wide and lives in the MAIN firstmate home: a secondmate
 #   home reads that one register through the main-home pointer it records at seed time and
 #   on every --secondmate launch (bin/fm-fleet-home-lib.sh), never a copy of its own. A
-#   secondmate home that cannot resolve it has a broken control, not an empty one, so every
-#   ship and scout spawn from it WARNS loudly on stderr and proceeds. A register
+#   secondmate home that cannot resolve it - including a pointer naming something that is
+#   not a main firstmate home - has a broken control, not an empty one, so every ship and
+#   scout spawn from it WARNS loudly on stderr and proceeds; so does a secondmate home
+#   holding its own data/closed.md, which is never read. A register
 #   bullet that is not a well-formed entry (no second ':', empty slug, or no usable keyword)
 #   closes nothing, and is warned about on stderr rather than skipped silently.
 #   FM_CLOSED_EXPLAIN=1 prints the exact haystack the gate matched, how many marked regions
@@ -100,6 +102,10 @@ if ! CLOSED=$(fm_fleet_register "$FM_HOME" "$DATA" closed.md); then
   CLOSED_UNRESOLVED=$CLOSED
   CLOSED=
 fi
+# A closure written into a secondmate home's own data/closed.md is never read. It is
+# the easiest mistake to make here (AGENTS.md says to add a closure line without
+# naming a home) and the quietest to live with, so it is named rather than skipped.
+CLOSED_SHADOW=$(fm_fleet_shadow_register "$FM_HOME" "$DATA" closed.md)
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
@@ -554,6 +560,9 @@ REOPENED_CLOSED=
 # secondmate home would be its own outage.
 if [ "$KIND" != secondmate ] && [ -n "$CLOSED_UNRESOLVED" ]; then
   fm_fleet_register_warning "$FM_HOME" closed.md "$CLOSED_UNRESOLVED"
+fi
+if [ "$KIND" != secondmate ] && [ -n "$CLOSED_SHADOW" ]; then
+  fm_fleet_shadow_warning "$CLOSED_SHADOW" closed.md "$CLOSED"
 fi
 if [ "$KIND" != secondmate ] && [ -n "$CLOSED" ] && [ -f "$CLOSED" ]; then
   # A "- " line that is not a well-formed entry gates nothing, so say so out loud

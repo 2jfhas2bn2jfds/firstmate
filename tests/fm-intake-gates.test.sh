@@ -837,7 +837,8 @@ secondmate_fixture() {
   main="$TMP_ROOT/$name-main"
   sub="$TMP_ROOT/$name-sub"
   wt="$TMP_ROOT/$name-wt"
-  mkdir -p "$main/data" "$main/state" "$main/projects"
+  mkdir -p "$main/data" "$main/state" "$main/projects" "$main/bin"
+  printf '# Firstmate\n' > "$main/AGENTS.md"
   fm_git_init_commit "$main/projects/alpha"
   fm_git_add_origin "$main/projects/alpha" "$TMP_ROOT/remotes/$name-alpha.git"
   printf -- '- alpha [direct-PR] - alpha project (added 2026-07-01)\n' > "$main/data/projects.md"
@@ -906,6 +907,25 @@ EOF
   assert_not_contains "$out" "cannot reach the fleet's data/closed.md" \
     "control: an intact pointer was reported as unreachable"
 
+  # Positive control on the same pointer: a valid main home target still RESOLVES and
+  # the register it reaches still fires, so the rejections below cannot pass by
+  # resolution having broken outright.
+  write_brief "$sub" broken-s2 'Drain the deleted user backlog and report what is left.'
+  out=$(run_spawnable "$sub" "$wt" broken-s2 projects/alpha codex --why captain)
+  status=$?
+  expect_code 3 "$status" "control: a valid pointer stopped enforcing the register (got: $out)"
+  assert_contains "$out" "this topic is CLOSED." "control: the resolved register lost its refusal"
+
+  # A target that is merely an enterable directory is the pointer failure an operator
+  # is most likely to produce, and the one that used to pass silently: it resolves to a
+  # <target>/data/closed.md that does not exist, which reads as "no closures set".
+  mkdir -p "$TMP_ROOT/broken-unrelated"
+  mkdir -p "$TMP_ROOT/broken-partial/bin"
+  printf '# Firstmate\n' > "$TMP_ROOT/broken-partial/AGENTS.md"
+  mkdir -p "$TMP_ROOT/broken-othersub/bin" "$TMP_ROOT/broken-othersub/data"
+  printf '# Firstmate\n' > "$TMP_ROOT/broken-othersub/AGENTS.md"
+  printf 'othersub\n' > "$TMP_ROOT/broken-othersub/.fm-secondmate-home"
+
   local case_label pointer expect n=0
   while IFS='|' read -r case_label pointer expect; do
     [ -n "$case_label" ] || continue
@@ -915,6 +935,10 @@ EOF
       dangling) printf '%s\n' "$TMP_ROOT/broken-no-such-home" > "$sub/config/primary-home" ;;
       empty) : > "$sub/config/primary-home" ;;
       relative) printf 'not/an/absolute/path\n' > "$sub/config/primary-home" ;;
+      parent) printf '%s\n' "$TMP_ROOT" > "$sub/config/primary-home" ;;
+      unrelated) printf '%s\n' "$TMP_ROOT/broken-unrelated" > "$sub/config/primary-home" ;;
+      partial) printf '%s\n' "$TMP_ROOT/broken-partial" > "$sub/config/primary-home" ;;
+      othersub) printf '%s\n' "$TMP_ROOT/broken-othersub" > "$sub/config/primary-home" ;;
     esac
     write_brief "$sub" "broken-u$n" 'Add a settings screen for notification preferences.'
     out=$(run_spawnable "$sub" "$wt" "broken-u$n" projects/alpha codex --why captain)
@@ -928,6 +952,10 @@ a missing pointer warns|missing|no main firstmate home recorded at
 a dangling pointer warns|dangling|which does not exist
 an empty pointer warns|empty|is empty
 a relative pointer warns|relative|must hold an absolute path
+a pointer at the main home parent warns|parent|is not a firstmate home (missing AGENTS.md)
+a pointer at an unrelated directory warns|unrelated|is not a firstmate home (missing AGENTS.md)
+a pointer at a half-shaped home warns|partial|is not a firstmate home (missing data/)
+a pointer at another secondmate home warns|othersub|which is itself a secondmate home
 ROWS
 
   # The same broken control must be visible at session start in that home, not only
@@ -946,6 +974,59 @@ ROWS
     "bootstrap in a secondmate home did not report the main home's closures"
   assert_not_contains "$boot" "CLOSED_TOPICS_UNRESOLVED" "a resolvable register still reported as unresolved"
   pass "gate 2: a secondmate home that cannot reach the register is loud, and still dispatches"
+}
+
+# A secondmate is a firstmate running this same AGENTS.md, and "add a closure line when
+# the captain closes a topic" does not name a home at the point of action, so a captain
+# closing a topic while steering a lead will naturally write it into that lead's own
+# data/closed.md. Nothing reads that file. It is neither deleted nor honoured - one
+# register is the design - but it must never look like it took effect.
+test_secondmate_local_register_is_reported() {
+  local main sub wt out status fakebin boot
+  read -r main sub wt <<EOF
+$(secondmate_fixture shadow)
+EOF
+  printf -- '- deleted-user-backlog: deleted user backlog: closed by the captain (closed 2026-07-25)\n' \
+    > "$main/data/closed.md"
+  write_brief "$sub" shadow-s1 'Add a settings screen for notification preferences.'
+
+  # Control first: with no local register the spawn says nothing about one.
+  out=$(run_spawnable "$sub" "$wt" shadow-s1 projects/alpha codex --why captain)
+  status=$?
+  expect_code 0 "$status" "control: a clean secondmate home refused the spawn (got: $out)"
+  assert_not_contains "$out" "is IGNORED." "control: a home with no local register was warned about one"
+
+  printf -- '- local-closure: some local topic: written in the wrong home (closed 2026-07-26)\n' \
+    > "$sub/data/closed.md"
+  write_brief "$sub" shadow-s2 'Add a settings screen for notification preferences.'
+  out=$(run_spawnable "$sub" "$wt" shadow-s2 projects/alpha codex --why captain)
+  status=$?
+  expect_code 0 "$status" "an ignored local register refused the spawn instead of warning (got: $out)"
+  assert_contains "$out" "$sub/data/closed.md is IGNORED." "the ignored local register was silent"
+  assert_contains "$out" "$(cd "$main" && pwd)/data/closed.md" \
+    "the warning did not name the register that does apply"
+  assert_present "$sub/state/shadow-s2.meta" "a warned spawn did not proceed"
+
+  # It is reported, not honoured: the local line still closes nothing.
+  write_brief "$sub" shadow-s3 'Investigate some local topic before the next release.'
+  out=$(run_spawnable "$sub" "$wt" shadow-s3 projects/alpha codex --why captain)
+  status=$?
+  expect_code 0 "$status" "a local register was honoured instead of ignored (got: $out)"
+
+  # And visible at session start in that home, not only at the moment of a spawn.
+  fakebin=$(fm_fakebin "$TMP_ROOT/shadow-bootstrap")
+  fm_fake_exit0 "$fakebin" tmux node gh gh-axi chrome-devtools-axi lavish-axi curl jq treehouse no-mistakes
+  boot=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$sub" FM_ROOT_OVERRIDE="$sub" TMUX='' "$BOOTSTRAP")
+  assert_contains "$boot" "CLOSED_TOPICS_LOCAL_IGNORED: $sub/data/closed.md is IGNORED" \
+    "bootstrap in a secondmate home hid the ignored local register"
+  assert_contains "$boot" "CLOSED_TOPICS: 1 closed at intake: deleted-user-backlog" \
+    "bootstrap reported the local register's slugs instead of the fleet's"
+
+  # Positive control for that report: removing the local file removes the line.
+  rm -f "$sub/data/closed.md"
+  boot=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$sub" FM_ROOT_OVERRIDE="$sub" TMUX='' "$BOOTSTRAP")
+  assert_not_contains "$boot" "CLOSED_TOPICS_LOCAL_IGNORED" "a home with no local register still reported one"
+  pass "gate 2: a secondmate home's own closed.md is reported as ignored, and never honoured"
 }
 
 # The fleet access map is the same pointer and the same drift argument: the crews a
@@ -1257,6 +1338,7 @@ test_placeholder_mention_in_task_body_spawns
 test_closed_absent_register
 test_closed_register_reaches_secondmate_homes
 test_secondmate_unresolvable_register_is_loud
+test_secondmate_local_register_is_reported
 test_access_map_reaches_secondmate_homes
 test_meta_records_provenance
 test_brief_freshness_section

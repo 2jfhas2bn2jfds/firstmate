@@ -8,9 +8,13 @@
 # interesting. This library moves the closure to the one place that cannot be
 # talked past: fm-spawn refusing with a non-zero exit.
 #
-# The register is data/closed.md under the active firstmate home - gitignored
-# with the rest of data/, because closures are captain-specific while the
-# mechanism is shared. One entry per line:
+# The register is the fleet's ONE data/closed.md, and it lives in the MAIN firstmate
+# home - gitignored with the rest of data/, because closures are captain-specific
+# while the mechanism is shared. A secondmate home keeps no copy of its own (a copy
+# drifts, and a stale copy is a closure that silently expires); it reads that one file
+# through the main-home pointer it records, and callers resolve the path with
+# bin/fm-fleet-home-lib.sh rather than assuming the active home holds it. One entry
+# per line:
 #
 #   - <slug>: <comma-separated keywords>: <one-line why> (closed <date>)
 #

@@ -455,7 +455,14 @@ liveness_daemon_ensure() {
 # broken there rather than empty, and since most crews are dispatched by secondmates
 # that silence would hide the control being inert exactly where work starts.
 closed_topics_report() {
-  local register slugs malformed count
+  local register slugs malformed count shadow
+  # A secondmate home that keeps its own data/closed.md is a closure the captain
+  # believes is set and that nothing reads. Reported before the register itself, so
+  # it is visible even when the pointer is also broken.
+  shadow=$(fm_fleet_shadow_register "$FM_HOME" "$DATA" closed.md)
+  if [ -n "$shadow" ]; then
+    echo "CLOSED_TOPICS_LOCAL_IGNORED: $shadow is IGNORED; closures belong in the main firstmate home's data/closed.md, which this home reads through $FM_PRIMARY_HOME_POINTER"
+  fi
   if ! register=$(fm_fleet_register "$FM_HOME" "$DATA" closed.md); then
     echo "CLOSED_TOPICS_UNRESOLVED: this secondmate home cannot reach the fleet's data/closed.md: $register"
     return 0

@@ -148,10 +148,19 @@ FRESHNESS_BLOCK=$(freshness_block_text)
 # when the map is simply absent: the structural section still ships, because the part
 # that must always reach a crewmate is "probe, then escalate", not the inventory.
 fleet_access_body() {
-  local access
+  local access shadow
+  # A map written into a secondmate home's own data/access.md reaches no brief, so it
+  # is named rather than left to look like it took effect.
+  shadow=$(fm_fleet_shadow_register "$FM_HOME" "$DATA" access.md)
   if ! access=$(fm_fleet_register "$FM_HOME" "$DATA" access.md); then
+    if [ -n "$shadow" ]; then
+      fm_fleet_shadow_warning "$shadow" access.md ""
+    fi
     fm_fleet_register_warning "$FM_HOME" access.md "$access"
     return 0
+  fi
+  if [ -n "$shadow" ]; then
+    fm_fleet_shadow_warning "$shadow" access.md "$access"
   fi
   [ -f "$access" ] || return 0
   cat "$access"
