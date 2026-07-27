@@ -865,6 +865,7 @@ test_placeholder_mention_in_task_body_spawns() {
   read -r home wt <<EOF
 $(spawnable_home placeholder-mention)
 EOF
+  # shellcheck disable=SC2016  # single quotes are deliberate: the markdown fence backticks must stay literal
   write_brief "$home" mention-p1 '# Task\nRewrite the brief scaffold so firstmate must replace the {TASK} placeholder before spawning.\n\n```sh\n# regenerate, then fill it in\nsed -i "" "s/{TASK}/the real task/" data/x/brief.md\n```\n'
   out=$(run_spawnable "$home" "$wt" mention-p1 projects/alpha codex --why captain)
   status=$?
@@ -912,6 +913,7 @@ ROWS
   # Positive control on the same fixture: the identical prose with the placeholder
   # standing alone OUTSIDE any fence still refuses, so the passes above cannot be the
   # check having simply stopped firing.
+  # shellcheck disable=SC2016  # single quotes are deliberate: the markdown fence backticks must stay literal
   write_brief "$home" fence-q9 '# Task\nRewrite the scaffold so the task section:\n\n```markdown\n# Task\n```\n\nis replaced before spawning.\n\n{TASK}\n'
   out=$(run_spawnable "$home" "$wt" fence-q9 projects/alpha codex --why captain)
   status=$?
@@ -971,6 +973,7 @@ ROWS
 
   FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
     FM_STATE_OVERRIDE="$home/state" "$BRIEF_SH" convfence-fenced alpha >/dev/null 2>&1
+  # shellcheck disable=SC2016  # single quotes are deliberate: the markdown fence backticks must stay literal
   printf '%b\n' 'Rewrite the scaffold so the task section:\n\n```markdown\n# Task\n{TASK}\n```\n\nis replaced before spawning.' \
     > "$TMP_ROOT/convfence-body.txt"
   fill_task "$home/data/convfence-fenced/brief.md" "$TMP_ROOT/convfence-body.txt"
@@ -994,6 +997,7 @@ test_unfilled_task_anchor_ignores_indented_heading() {
   read -r home wt <<EOF
 $(spawnable_home unfilled-indented)
 EOF
+  # shellcheck disable=SC2016  # single quotes are deliberate: the markdown fence backticks must stay literal
   printf '%b\n' '# Captain\n\n## Engineering conventions\n\n- Briefs look like this:\n\n```markdown\n  # Task\n  the actual task\n```\n' \
     > "$home/data/captain.md"
 
@@ -1001,6 +1005,7 @@ EOF
     FM_STATE_OVERRIDE="$home/state" "$BRIEF_SH" indented-demo alpha >/dev/null 2>&1
   assert_grep '  # Task' "$home/data/indented-demo/brief.md" \
     "the fixture brief did not carry the indented conventions heading"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the markdown fence backticks must stay literal
   printf '%b\n' 'Rewrite the scaffold so the task section:\n\n```markdown\n# Task\n{TASK}\n```\n\nis replaced before spawning.' \
     > "$TMP_ROOT/indented-body.txt"
   fill_task "$home/data/indented-demo/brief.md" "$TMP_ROOT/indented-body.txt"
@@ -1041,6 +1046,7 @@ EOF
 
   # Positive control: the same brief with the fence CLOSED is a demonstration, not an
   # unfilled brief, so the refusal above cannot be the check firing unconditionally.
+  # shellcheck disable=SC2016  # single quotes are deliberate: the markdown fence backticks must stay literal
   write_brief "$home" openfence-u2 '# Task\nShow the scaffold shape:\n\n```markdown\n{TASK}\n```\n\nThen fill it in.\n'
   out=$(run_spawnable "$home" "$wt" openfence-u2 projects/alpha codex --why captain)
   status=$?

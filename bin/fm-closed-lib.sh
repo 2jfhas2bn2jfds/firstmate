@@ -274,7 +274,9 @@ fm_closed_haystack_body() {
   # after them, because both come out of the same pass.
   walked=$(fm_closed_walk "$brief")
   status=$(printf '%s\n' "$walked" | head -n 1 | cut -d' ' -f2-)
+  # shellcheck disable=SC2034 # FM_CLOSED_LAST_MARKER_STATUS is read by callers after this returns.
   FM_CLOSED_LAST_MARKER_STATUS=$status
+  # shellcheck disable=SC2034 # stripped is a positional field of the status line; only state and kept are read here.
   read -r state stripped kept <<EOF
 $status
 EOF
