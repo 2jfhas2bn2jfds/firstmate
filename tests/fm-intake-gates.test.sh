@@ -953,6 +953,45 @@ EOF
   pass "spawn: an unbalanced fence resolves to unfilled rather than inferring filled"
 }
 
+# Fences are read ONLY inside the task section. A brief with no task heading gets no
+# fence tracking at all, because the fence state would have to be accumulated from the
+# top of the file - across the injected conventions, whose copy out of data/captain.md
+# is cut at the next heading and can leave a fence hanging open. Under that fallback an
+# open fence made the placeholder "fenced", and any later fence in the generated blocks
+# cleared it again, so the brief read as FILLED. There is no such fallback now: no
+# heading means no evidence, and no evidence means refuse.
+test_unfilled_brief_without_task_heading_refuses() {
+  local label brief out status home wt
+  read -r home wt <<EOF
+$(spawnable_home unfilled-noheading)
+EOF
+  local i=0
+  while IFS='|' read -r label brief; do
+    [ -n "$label" ] || continue
+    i=$((i + 1))
+    write_brief "$home" "noheading-r$i" "$brief"
+    out=$(run_spawnable "$home" "$wt" "noheading-r$i" projects/alpha codex --why captain)
+    status=$?
+    expect_code 4 "$status" "$label: an unfilled brief with no task heading spawned anyway (got: $out)"
+    assert_contains "$out" "the brief was never filled in" "$label: the refusal text changed"
+    assert_absent "$home/state/noheading-r$i.meta" "$label: a refused spawn still wrote meta"
+  done <<'ROWS'
+bare placeholder|Rewrite the brief scaffold.\n\n{TASK}\n
+placeholder after an open fence|Rewrite the brief scaffold:\n\n```markdown\n{TASK}\n
+placeholder inside a closed fence|Rewrite the brief scaffold:\n\n```markdown\n{TASK}\n```\n
+ROWS
+
+  # Positive control on the same fixture: a headingless brief with no placeholder at
+  # all still spawns, so the refusals above cannot be the check firing on every brief
+  # that lacks a task heading.
+  write_brief "$home" noheading-ok 'Rewrite the brief scaffold so the placeholder is filled in before dispatch.'
+  out=$(run_spawnable "$home" "$wt" noheading-ok projects/alpha codex --why captain)
+  status=$?
+  expect_code 0 "$status" "control: a headingless brief with no placeholder was refused (got: $out)"
+  assert_present "$home/state/noheading-ok.meta" "control: a legitimate headingless brief did not spawn"
+  pass "spawn: a brief with no task heading gets no fence tracking, so any placeholder refuses"
+}
+
 # A check with no escape hatch eventually blocks legitimate work with no recourse, and
 # gate 2 itself has --reopen-closed, so the unfilled-brief check must not be stricter
 # than the closure gate. The waiver is loud and leaves a trace in meta, and - like the
@@ -1561,6 +1600,7 @@ test_placeholder_mention_in_task_body_spawns
 test_placeholder_inside_fence_spawns
 test_unfilled_brief_survives_conventions_fence
 test_unfilled_brief_unbalanced_task_fence_refuses
+test_unfilled_brief_without_task_heading_refuses
 test_allow_unfilled_task_override
 test_closed_absent_register
 test_closed_register_reaches_secondmate_homes

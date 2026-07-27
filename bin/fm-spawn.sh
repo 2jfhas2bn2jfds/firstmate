@@ -571,8 +571,16 @@ brief_has_unfilled_task() {
     function trim(t) { sub(/^[ \t]+/, "", t); sub(/[ \t\r]+$/, "", t); return t }
     { all[n++] = $0; if (!start && trim($0) == heading) start = n }
     END {
-      # start == 0 means the brief carries no task heading (a hand-written brief):
-      # scan the whole file, still with fence state starting closed.
+      # NO TASK HEADING MEANS NO FENCE TRACKING AT ALL. Fences are read only inside
+      # the task section, where the structure is known; a brief with no task heading
+      # offers no evidence about where a fence opened, so any standalone placeholder
+      # is unfilled. Scanning the whole file for fences instead is what let an open
+      # fence in the injected conventions swallow the placeholder. Do not reinstate
+      # it: this check refuses when unsure, and that is the entire margin it has.
+      if (!start) {
+        for (i = 0; i < n; i++) if (trim(all[i]) == "{TASK}") exit 0
+        exit 1
+      }
       for (i = start; i < n; i++) {
         line = trim(all[i])
         if (line ~ /^(```|~~~)/) {

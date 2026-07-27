@@ -147,14 +147,22 @@ FM_CLOSED_INJECTED_OPENERS='You are a crewmate:|# Engineering conventions|# Setu
 # of a brief and never matched against the register.
 FM_CLOSED_WALK_STATUS='fm-closed-walk-status:'
 
-# fm_closed_walk <brief-file>: the ONE pass over a brief that both the marker status
-# and the haystack body are derived from.
+# fm_closed_walk <brief-file>: the ONE and only pass over a brief. Both the marker
+# status and the haystack body are derived from it, and nothing else reads a brief.
 #
 # Prints "<sentinel> <state> <stripped> <kept>" and then every line the haystack
-# keeps. Status and body come out of the same walk on purpose: the kept count drives
-# the stderr warning that describes what the body actually kept, so two programs that
+# keeps, where state is one of:
+#   none        the file carries no boilerplate markers at all
+#   ok          every marker is balanced and non-nested; <stripped> counts the regions
+#               that also open with an injected heading and are therefore dropped,
+#               <kept> counts the marked regions that do not and are therefore kept
+#   unbalanced  a start with no end, an end with no start, or a nested start
+#
+# Status and body come out of the same walk on purpose: the kept count drives the
+# stderr warning that describes what the body actually kept, so two programs that
 # merely agreed by hand could drift into a gate warning about a different set of
-# regions than it matched.
+# regions than it matched. Take both from fm_closed_haystack_body (the body it prints,
+# the status in FM_CLOSED_LAST_MARKER_STATUS); do not add a second reader here.
 fm_closed_walk() {
   local brief=$1
   awk -v s="$FM_CLOSED_BOILERPLATE_START" -v e="$FM_CLOSED_BOILERPLATE_END" \
@@ -194,25 +202,6 @@ fm_closed_walk() {
       for (i = 0; i < nkeep; i++) print keep[i]
     }
   ' "$brief"
-}
-
-# fm_closed_marker_status <brief-file>: print "<state> <stripped> <kept>" where state is
-#   none        the file carries no boilerplate markers at all
-#   ok          every marker is balanced and non-nested; <stripped> counts the regions
-#               that also open with an injected heading and are therefore dropped,
-#               <kept> counts the marked regions that do not and are therefore kept
-#   unbalanced  a start with no end, an end with no start, or a nested start
-#
-# For the status of a brief whose haystack you are ALSO taking, do not call this:
-# read FM_CLOSED_LAST_MARKER_STATUS after fm_closed_haystack_body, so the counts and
-# the body provably come from one pass over one file.
-fm_closed_marker_status() {
-  local brief=$1
-  if [ ! -f "$brief" ]; then
-    printf 'none 0 0\n'
-    return 0
-  fi
-  fm_closed_walk "$brief" | head -n 1 | cut -d' ' -f2-
 }
 
 # fm_closed_haystack_body <brief-file>: print the whole brief MINUS the regions

@@ -58,3 +58,20 @@ jobs:
             printf '%s\n' "$tracked"
             exit 1
           fi
+      # A stray file at the repo root is obvious once seen and invisible otherwise:
+      # the lint job globs bin/ and tests/, the test job globs tests/*.test.sh, and
+      # nothing else looks here. A mis-quoted shell redirect once committed an 82KB
+      # duplicate of the test suite named `rite_brief() {,+14p` and every job passed.
+      # New root files are rare and deliberate, so the allowlist is cheap to extend.
+      - name: Repo root must carry only its known files
+        run: |
+          set -eu
+          unexpected=$(git ls-files | grep -v / | grep -vxF -e .gitignore \
+            -e .no-mistakes.yaml -e .tasks.toml -e AGENTS.md -e CLAUDE.md \
+            -e CONTRIBUTING.md -e LICENSE -e README.md || true)
+          if [ -n "$unexpected" ]; then
+            echo "::error::Unexpected tracked files at the repo root:"
+            printf '%s\n' "$unexpected"
+            echo "Remove them, or add them to the allowlist in this job if they belong here."
+            exit 1
+          fi
