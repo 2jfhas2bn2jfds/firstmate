@@ -363,8 +363,8 @@ The tag and note are recorded as `why=` in the task's meta.
 `--secondmate` is exempt: launching a persistent supervisor is lifecycle, not work.
 
 **A closed topic refuses at the spawn call.**
-The script matches the task id and the brief's `# Task` section against `data/closed.md` and refuses, printing the closure line, when they hit; `--reopen-closed` proceeds and records `reopened_closed=<slug>` in meta, and is only for a reopen the captain explicitly authorised.
-Only the task-specific section is matched, never the boilerplate `fm-brief.sh` injects into every brief, so a keyword landing in the conventions, freshness, access, or fleet-map blocks cannot refuse every dispatch in the fleet.
+The script matches the task id and the brief, minus the boilerplate `fm-brief.sh` injects into every brief, against `data/closed.md` and refuses, printing the closure line, when they hit; `--reopen-closed` proceeds and records `reopened_closed=<slug>` in meta, and is only for a reopen the captain explicitly authorised.
+The injected conventions, setup, rules, freshness, access, fleet-map, project-memory and definition-of-done sections are stripped, so a keyword landing in them cannot refuse every dispatch in the fleet; everything else in the brief stays matched, including a task body with its own `# ` headings, so an unrecognized heading widens the haystack rather than silently narrowing it.
 Add a closure line when the captain closes a topic: `- <slug>: <comma-separated keywords>: <one-line why> (closed <date>)`, with specific multi-word keywords (a bare generic word blocks unrelated work).
 A `- ` line that is not a well-formed entry closes nothing and is warned about rather than skipped, on stderr at the spawn call and as a `CLOSED_TOPICS_MALFORMED:` line at bootstrap; fix or remove the line, because until then the captain believes that topic is closed and it is not.
 

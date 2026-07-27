@@ -357,8 +357,8 @@ EOF
   pass "gate 2: comments, prose, and malformed lines in the register never gate work"
 }
 
-# The haystack is the task id plus the brief's TASK section, never the boilerplate
-# fm-brief.sh injects into every ship and scout brief. A closure keyword landing in
+# The haystack is the task id plus the brief MINUS the boilerplate fm-brief.sh
+# injects into every ship and scout brief. A closure keyword landing in
 # the conventions, freshness, access-routing or fleet-map blocks would otherwise
 # match EVERY generated brief and refuse EVERY dispatch in the fleet - a control
 # that fails closed on everything is worse than the problem it solves.
@@ -385,7 +385,7 @@ EOF
     assert_grep "Sentry" "$brief" "$id: the injected access map did not carry the keyword"
   done
 
-  # Negative: an unrelated task whose "# Task" section never mentions the closure.
+  # Negative: an unrelated task whose own text never mentions the closure.
   perl -0pi -e 's/\{TASK\}/Add a settings screen for notification preferences./' \
     "$home/data/boilerplate-n1/brief.md"
   out=$(run_spawnable "$home" "$wt" boilerplate-n1 projects/alpha codex --why captain)
@@ -401,7 +401,89 @@ EOF
   expect_code 3 "$status" "positive control: a keyword in the task body did not refuse"
   assert_contains "$out" "this topic is CLOSED" "positive control: no closure refusal"
   assert_absent "$home/state/boilerplate-n2.meta" "a refused spawn still wrote meta"
-  pass "gate 2: only the task section is matched, so injected brief boilerplate cannot gate the fleet"
+  pass "gate 2: injected brief boilerplate is stripped, so it cannot gate the fleet"
+}
+
+# fill_task <brief-file> <body-file>: replace the scaffold's {TASK} placeholder with
+# a multi-line task body, so a test can put a "# " line INSIDE the task.
+fill_task() {
+  local brief=$1 bodyfile=$2
+  awk -v bf="$bodyfile" '
+    $0 == "{TASK}" { while ((getline l < bf) > 0) print l; close(bf); next }
+    { print }
+  ' "$brief" > "$brief.tmp" && mv "$brief.tmp" "$brief"
+}
+
+# The task body is free text firstmate writes, and it routinely contains its own
+# "# " lines: a fenced shell snippet whose first line is a comment, or a task that
+# structures itself with a heading. Extracting a "# Task" section would stop at the
+# first such line and stop matching everything after it - a closure silently covering
+# less than the captain believes, with no signal anywhere. So the stripper SUBTRACTS
+# known injected sections instead, and these cases prove a keyword after a stray
+# "# " line still refuses.
+#
+# Run end to end on REAL generated briefs (the injected boilerplate has to be
+# present for the subtraction to mean anything), and paired with a negative control
+# on the SAME register and SAME injected map: a matcher that had degenerated into
+# matching everything would pass both positives while proving nothing.
+test_closed_matches_task_body_after_hash_line() {
+  local home wt out status brief body hashline id label verdict n=0
+  read -r home wt <<EOF
+$(spawnable_home closed-taskbody)
+EOF
+  printf -- '- Sentry: MCP-backed. reach: probe first.\n' > "$home/data/access.md"
+  printf '%s\n' \
+'- sentry-topic: Sentry: handled by the captain out of band (closed 2026-07-27)
+- deleted-user-backlog: deleted user backlog: closed by the captain (closed 2026-07-25)' \
+    > "$home/data/closed.md"
+
+  body="$TMP_ROOT/closed-taskbody-body"
+  while IFS='|' read -r label verdict; do
+    [ -n "$label" ] || continue
+    n=$((n + 1))
+    id="taskbody-j$n"
+    case "$n" in
+      1) # fenced snippet whose first line is a shell comment
+        hashline='# install deps'
+        printf '%s\n' 'Reproduce the export failure.' '' '```' \
+          "$hashline" 'npm ci' '```' '' \
+          'Then work the deleted user backlog until it drains.' > "$body" ;;
+      2) # the task body carries its own level-1 heading
+        hashline='# Acceptance criteria'
+        printf '%s\n' 'Reproduce the export failure.' '' "$hashline" \
+          '- the deleted user backlog drains cleanly' > "$body" ;;
+      3) # same shape, no closed keyword anywhere but the injected access map
+        hashline='# Acceptance criteria'
+        printf '%s\n' 'Reproduce the export failure.' '' "$hashline" \
+          '- notification preferences round-trip' > "$body" ;;
+    esac
+    FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
+      FM_STATE_OVERRIDE="$home/state" "$BRIEF_SH" "$id" alpha >/dev/null 2>&1
+    brief="$home/data/$id/brief.md"
+    assert_grep "Sentry" "$brief" "$id: the injected access map did not carry the keyword"
+    fill_task "$brief" "$body"
+    assert_grep "$hashline" "$brief" "$id: the task body lost its own \"# \" line"
+    out=$(run_spawnable "$home" "$wt" "$id" projects/alpha codex --why captain)
+    status=$?
+    case "$verdict" in
+      match)
+        expect_code 3 "$status" "$label"
+        assert_contains "$out" "this topic is CLOSED" "$label: expected a closure refusal"
+        assert_contains "$out" "- deleted-user-backlog: deleted user backlog:" \
+          "$label: the closure line was not printed verbatim"
+        assert_absent "$home/state/$id.meta" "$label: a refused spawn still wrote meta"
+        ;;
+      nomatch)
+        expect_code 0 "$status" "$label: unrelated work was blocked (got: $out)"
+        assert_present "$home/state/$id.meta" "$label: unrelated work did not spawn"
+        ;;
+    esac
+  done <<'ROWS'
+a keyword after a fenced "# install deps" line still refuses|match
+a keyword after the task's own "# Acceptance criteria" heading still refuses|match
+control: the same shape with no closed keyword still spawns|nomatch
+ROWS
+  pass "gate 2: a \"# \" line inside the task body cannot silently narrow the haystack"
 }
 
 # A "- " line that is not a well-formed entry closes NOTHING, so it must get LOUDER,
@@ -702,6 +784,7 @@ test_closed_refusal_shows_the_line
 test_closed_matching_precision
 test_closed_ignores_non_entries
 test_closed_ignores_injected_boilerplate
+test_closed_matches_task_body_after_hash_line
 test_closed_malformed_line_is_loud
 test_closed_absent_register
 test_meta_records_provenance

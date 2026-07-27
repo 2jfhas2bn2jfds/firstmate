@@ -38,7 +38,8 @@ A silent skip would leave the captain believing a topic is closed while the gate
 
 Matching normalizes case and punctuation and requires whole-token phrase hits, so `post-deletion`, `Post Deletion`, and a phrase wrapped across a line break all match, while `billings` does not match `billing`.
 Breadth is the operator's lever: a one-word generic keyword blocks unrelated work that merely mentions it, so entries should carry specific multi-word phrases.
-Only the task id and the brief's `# Task` section are matched, never the boilerplate `bin/fm-brief.sh` injects into every brief, so a keyword that happens to appear in the conventions, freshness, access, or fleet-map blocks cannot refuse the whole fleet's dispatch.
+The haystack is the task id plus the brief with `bin/fm-brief.sh`'s injected boilerplate sections stripped out (conventions, setup, rules, freshness, access and routing, fleet access map, project memory, definition of done), so a keyword that happens to appear in that boilerplate cannot refuse the whole fleet's dispatch.
+Everything else in the brief stays matched, including a task body that carries its own `# ` headings or fenced snippets: the stripper subtracts known sections rather than extracting one, so an unrecognized heading widens the haystack (a loud false refusal, undone with one flag) instead of narrowing it (a closure silently covering less than the captain believes).
 `--reopen-closed` is the one authorised bypass; it records `reopened_closed=<slug>` in the task's meta and is refused in batch dispatch, so one captain-authorised reopen never widens into a blanket bypass for every pair.
 
 ## Fleet access map (data/access.md)

@@ -24,7 +24,8 @@
 #
 # MATCHING RULE (stated here because a gate whose rule is not written down is a
 # gate nobody can predict):
-#   1. Both the haystack (task id + task-specific brief text) and each keyword are normalized:
+#   1. Both the haystack (task id + the brief with fm-brief.sh's injected boilerplate
+#      sections stripped, see fm_closed_haystack_body) and each keyword are normalized:
 #      lowercased, then every character outside [a-z0-9] - punctuation, hyphens,
 #      underscores, newlines - becomes a space, and runs of spaces collapse to
 #      one. So "post-deletion", "Post Deletion", "post_deletion" and a phrase
@@ -98,28 +99,57 @@ fm_closed_malformed() {
   done < "$register"
 }
 
-# fm_closed_task_section <brief-file>: print the TASK-SPECIFIC body of a brief -
-# everything between its "# Task" heading and the next level-1 heading.
+# fm_closed_haystack_body <brief-file>: print the whole brief MINUS the boilerplate
+# fm-brief.sh injects into every ship and scout brief.
 #
-# The haystack must never include the boilerplate fm-brief.sh injects into every
-# ship and scout brief: the engineering conventions, the freshness block and its
-# list of live-state examples, the access-and-routing rules, and the whole of
-# data/access.md with every connector name in it. A closure keyword landing in any
-# of that would match EVERY brief and refuse EVERY dispatch, and a gate that
+# The boilerplate must never be matched: the engineering conventions, the freshness
+# block and its list of live-state examples, the access-and-routing rules, and the
+# whole of data/access.md with every connector name in it. A closure keyword landing
+# in any of that would match EVERY brief and refuse EVERY dispatch, and a gate that
 # refuses everything is worse than the problem it solves.
 #
-# A brief with no "# Task" heading is hand-written, so it carries no injected
-# boilerplate and the whole file is the task: fall back to it rather than matching
-# nothing, which would silently ungate hand-written briefs.
-fm_closed_task_section() {
+# This is deliberately a SUBTRACTION of known injected sections, not an extraction
+# of a "# Task" section, and the direction of failure is the whole point. Anything
+# not recognised as injected boilerplate stays IN the haystack, so:
+#   - a task body that contains its own "# " line (a fenced shell snippet starting
+#     with a comment, an "# Acceptance criteria" heading) is matched in full, where
+#     a task-section extractor would stop at that line and silently disarm the
+#     closure from there on;
+#   - if a heading is ever renamed in fm-brief.sh and the stripper stops recognising
+#     it, MORE text is matched, not less. That risks a false refusal, which is loud
+#     and visible to whoever ran the spawn and is undone with one flag. The opposite
+#     failure - a closure quietly covering less than the captain believes - is
+#     invisible, and it is exactly what this gate exists to prevent.
+# Do not "simplify" this back into a task-section extractor.
+#
+# A section runs from its heading to the next RECOGNISED heading (or end of file),
+# never to the next "# " line, so an unrecognised heading inside data/access.md
+# cannot leak the fleet map back into the haystack.
+# A hand-written brief carries none of these headings, so the whole file is matched.
+fm_closed_haystack_body() {
   local brief=$1
   [ -f "$brief" ] || return 0
   awk '
-    /^# Task[[:space:]]*$/ && !seen { seen = 1; intask = 1; next }
-    /^# / { intask = 0 }
-    intask { print }
-    END { if (!seen) exit 1 }
-  ' "$brief" || cat "$brief"
+    BEGIN {
+      drop["# engineering conventions (follow these)"] = 1
+      drop["# setup"] = 1
+      drop["# rules"] = 1
+      drop["# freshness provenance (required)"] = 1
+      drop["# access and routing (read this before you write \"could not check\")"] = 1
+      drop["## fleet access map"] = 1
+      drop["# project memory"] = 1
+      drop["# definition of done"] = 1
+      keep["# task"] = 1
+    }
+    {
+      line = $0
+      sub(/[ \t\r]+$/, "", line)
+      key = tolower(line)
+      if (key in drop) { dropping = 1; next }
+      if (key in keep) { dropping = 0; next }
+      if (!dropping) print
+    }
+  ' "$brief"
 }
 
 # fm_closed_match <register> <haystack-file>: print every matching entry as

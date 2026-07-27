@@ -10,8 +10,8 @@
 #   task's meta. "Interesting", "worth doing", "found while looking at X" and "tidy-up"
 #   are not reasons to start work, and there is no tag for them. --secondmate is exempt:
 #   launching a persistent supervisor is lifecycle, not work.
-#   INTAKE GATE 2 - closed topics refuse at intake. The task id and the brief's "# Task"
-#   section - never the boilerplate fm-brief.sh injects into every brief - are matched
+#   INTAKE GATE 2 - closed topics refuse at intake. The task id and the brief with
+#   fm-brief.sh's injected boilerplate sections stripped out are matched
 #   against data/closed.md (see bin/fm-closed-lib.sh for the register format and the exact
 #   matching rule); a match REFUSES and prints the closure line verbatim. A register line
 #   that starts with "- " but is not a well-formed entry closes nothing, and is warned
@@ -103,7 +103,7 @@ error: refusing to spawn - work must declare why it exists.
 Those are the only three reasons to start work. "Interesting", "worth doing",
 "found while looking at X", "we may as well" and "tidy-up" are NOT reasons, and
 there is deliberately no tag for them: work with no captain behind it costs the
-captain attention he did not agree to spend. If the work fits none of the three
+captain attention they did not agree to spend. If the work fits none of the three
 tags, it does not start - queue it in the backlog and let the captain choose.
 EOF
   printf 'reason: %s\n' "$reason" >&2
@@ -460,16 +460,17 @@ fi
 # reopened them, because a closure recorded only in prose does not survive a context
 # reset while the topic itself still looks live. Closure is therefore enforced where
 # the work would START, not where it would be reported: by the time a report exists,
-# the attention has already been spent. Matched against the task id AND the brief text
-# (see bin/fm-closed-lib.sh for the register format and matching rule). Secondmate
-# launches are exempt - they carry a charter, not a task.
+# the attention has already been spent. Matched against the task id AND the brief with
+# fm-brief.sh's injected boilerplate sections stripped out (see bin/fm-closed-lib.sh
+# for the register format and matching rule). Secondmate launches are exempt - they
+# carry a charter, not a task.
 #
-# The brief contributes only its "# Task" section, never the boilerplate fm-brief.sh
-# injects into every brief (conventions, freshness, access rules, the fleet access
-# map). Matching the whole file would let one unlucky keyword refuse every dispatch
+# The stripped sections are the conventions, setup, rules, freshness, access-routing,
+# fleet-map, project-memory and definition-of-done blocks fm-brief.sh injects into
+# every brief. Matching those too would let one unlucky keyword refuse every dispatch
 # in the fleet; a gate that fails closed on everything is worse than the failure it
-# was built to stop. A hand-written brief has no "# Task" heading and falls back to
-# its whole text, which carries no injected boilerplate.
+# was built to stop. Everything else in the brief - all of a hand-written one - stays
+# matched, so an unrecognised heading widens the haystack rather than narrowing it.
 REOPENED_CLOSED=
 if [ "$KIND" != secondmate ] && [ -f "$CLOSED" ]; then
   # A "- " line that is not a well-formed entry gates nothing, so say so out loud
@@ -486,7 +487,7 @@ if [ "$KIND" != secondmate ] && [ -f "$CLOSED" ]; then
     } >&2
   fi
   closed_hay=$(mktemp "${TMPDIR:-/tmp}/fm-closed.XXXXXX")
-  { printf '%s\n' "$ID"; fm_closed_task_section "$BRIEF"; } > "$closed_hay"
+  { printf '%s\n' "$ID"; fm_closed_haystack_body "$BRIEF"; } > "$closed_hay"
   closed_hits=$(fm_closed_match "$CLOSED" "$closed_hay" || true)
   rm -f "$closed_hay"
   if [ -n "$closed_hits" ]; then
