@@ -24,8 +24,8 @@
 #
 # MATCHING RULE (stated here because a gate whose rule is not written down is a
 # gate nobody can predict):
-#   1. Both the haystack (task id + the brief with fm-brief.sh's injected boilerplate
-#      sections stripped, see fm_closed_haystack_body) and each keyword are normalized:
+#   1. Both the haystack (task id + the brief with fm-brief.sh's marked boilerplate
+#      regions stripped, see fm_closed_haystack_body) and each keyword are normalized:
 #      lowercased, then every character outside [a-z0-9] - punctuation, hyphens,
 #      underscores, newlines - becomes a space, and runs of spaces collapse to
 #      one. So "post-deletion", "Post Deletion", "post_deletion" and a phrase
@@ -99,8 +99,41 @@ fm_closed_malformed() {
   done < "$register"
 }
 
-# fm_closed_haystack_body <brief-file>: print the whole brief MINUS the boilerplate
-# fm-brief.sh injects into every ship and scout brief.
+# Explicit machine markers that fm-brief.sh wraps around every block it injects
+# into a generated brief. They are HTML comments, so they are invisible in rendered
+# markdown, and nobody writes one by hand into a task description.
+FM_CLOSED_BOILERPLATE_START='<!-- fm:boilerplate start -->'
+FM_CLOSED_BOILERPLATE_END='<!-- fm:boilerplate end -->'
+
+# fm_closed_marker_status <brief-file>: print "<state> <count>" where state is
+#   none        the file carries no boilerplate markers at all
+#   ok          every marker is balanced and non-nested; count is the region count
+#   unbalanced  a start with no end, an end with no start, or a nested start
+fm_closed_marker_status() {
+  local brief=$1
+  if [ ! -f "$brief" ]; then
+    printf 'none 0\n'
+    return 0
+  fi
+  awk -v s="$FM_CLOSED_BOILERPLATE_START" -v e="$FM_CLOSED_BOILERPLATE_END" '
+    {
+      line = $0
+      sub(/^[ \t]+/, "", line)
+      sub(/[ \t\r]+$/, "", line)
+      if (line == s) { seen++; if (open) bad = 1; open = 1; starts++ }
+      else if (line == e) { seen++; if (!open) bad = 1; open = 0 }
+    }
+    END {
+      if (open) bad = 1
+      if (!seen) { print "none 0"; exit }
+      if (bad) { print "unbalanced " starts; exit }
+      print "ok " starts
+    }
+  ' "$brief"
+}
+
+# fm_closed_haystack_body <brief-file>: print the whole brief MINUS the regions
+# fm-brief.sh marked as injected boilerplate.
 #
 # The boilerplate must never be matched: the engineering conventions, the freshness
 # block and its list of live-state examples, the access-and-routing rules, and the
@@ -108,48 +141,57 @@ fm_closed_malformed() {
 # in any of that would match EVERY brief and refuse EVERY dispatch, and a gate that
 # refuses everything is worse than the problem it solves.
 #
-# This is deliberately a SUBTRACTION of known injected sections, not an extraction
-# of a "# Task" section, and the direction of failure is the whole point. Anything
-# not recognised as injected boilerplate stays IN the haystack, so:
-#   - a task body that contains its own "# " line (a fenced shell snippet starting
-#     with a comment, an "# Acceptance criteria" heading) is matched in full, where
-#     a task-section extractor would stop at that line and silently disarm the
-#     closure from there on;
-#   - if a heading is ever renamed in fm-brief.sh and the stripper stops recognising
-#     it, MORE text is matched, not less. That risks a false refusal, which is loud
-#     and visible to whoever ran the spawn and is undone with one flag. The opposite
-#     failure - a closure quietly covering less than the captain believes - is
-#     invisible, and it is exactly what this gate exists to prevent.
-# Do not "simplify" this back into a task-section extractor.
+# BOUNDARIES COME FROM EXPLICIT MARKERS, NEVER FROM HEADING TEXT, and that is the
+# whole design. A task body is free text firstmate writes, so it can contain any
+# heading a brief uses - a task about editing the brief scaffold quotes "# Setup" -
+# and a stripper keyed on heading text would then drop the rest of the task from the
+# haystack, silently covering less than the captain believes. That failure is
+# invisible, and it is exactly what this gate exists to prevent.
 #
-# A section runs from its heading to the next RECOGNISED heading (or end of file),
-# never to the next "# " line, so an unrecognised heading inside data/access.md
-# cannot leak the fleet map back into the haystack.
-# A hand-written brief carries none of these headings, so the whole file is matched.
+# Narrowing is therefore allowed only where it is CERTAIN, and every uncertain case
+# keeps MORE text rather than less:
+#   - no markers at all (a hand-written brief, or one generated before markers
+#     landed): the WHOLE file is the haystack. There is no heading-text fallback.
+#   - unbalanced or nested markers: the WHOLE file is the haystack AND a warning
+#     names the brief, because confidence is the precondition for dropping anything.
+#   - a marker fm-brief.sh stops emitting: MORE text is matched, so the worst case is
+#     a false refusal, which is loud, visible to whoever ran the spawn, and undone
+#     with one flag.
+# Do not "simplify" this back into a heading-text stripper or a task-section extractor.
+#
+# Set FM_CLOSED_EXPLAIN=1 on a spawn to see the exact haystack this produced and how
+# many marked regions it removed.
 fm_closed_haystack_body() {
-  local brief=$1
+  local brief=$1 status state
   [ -f "$brief" ] || return 0
-  awk '
-    BEGIN {
-      drop["# engineering conventions (follow these)"] = 1
-      drop["# setup"] = 1
-      drop["# rules"] = 1
-      drop["# freshness provenance (required)"] = 1
-      drop["# access and routing (read this before you write \"could not check\")"] = 1
-      drop["## fleet access map"] = 1
-      drop["# project memory"] = 1
-      drop["# definition of done"] = 1
-      keep["# task"] = 1
-    }
-    {
-      line = $0
-      sub(/[ \t\r]+$/, "", line)
-      key = tolower(line)
-      if (key in drop) { dropping = 1; next }
-      if (key in keep) { dropping = 0; next }
-      if (!dropping) print
-    }
-  ' "$brief"
+  status=$(fm_closed_marker_status "$brief")
+  state=${status%% *}
+  case "$state" in
+    ok)
+      awk -v s="$FM_CLOSED_BOILERPLATE_START" -v e="$FM_CLOSED_BOILERPLATE_END" '
+        {
+          line = $0
+          sub(/^[ \t]+/, "", line)
+          sub(/[ \t\r]+$/, "", line)
+          if (line == s) { dropping = 1; next }
+          if (line == e) { dropping = 0; next }
+          if (!dropping) print
+        }
+      ' "$brief"
+      ;;
+    unbalanced)
+      {
+        echo "warning: $brief has unbalanced fm:boilerplate markers, so no region can be"
+        echo "  confidently identified as injected boilerplate. Matching the WHOLE brief"
+        echo "  against the closed-topic register instead, which may refuse a spawn that a"
+        echo "  correctly marked brief would not. Regenerate the brief with bin/fm-brief.sh."
+      } >&2
+      cat "$brief"
+      ;;
+    *)
+      cat "$brief"
+      ;;
+  esac
 }
 
 # fm_closed_match <register> <haystack-file>: print every matching entry as

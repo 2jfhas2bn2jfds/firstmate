@@ -11,11 +11,12 @@
 #   are not reasons to start work, and there is no tag for them. --secondmate is exempt:
 #   launching a persistent supervisor is lifecycle, not work.
 #   INTAKE GATE 2 - closed topics refuse at intake. The task id and the brief with
-#   fm-brief.sh's injected boilerplate sections stripped out are matched
+#   fm-brief.sh's marked boilerplate regions stripped out are matched
 #   against data/closed.md (see bin/fm-closed-lib.sh for the register format and the exact
 #   matching rule); a match REFUSES and prints the closure line verbatim. A register line
 #   that starts with "- " but is not a well-formed entry closes nothing, and is warned
-#   about on stderr rather than skipped silently.
+#   about on stderr rather than skipped silently. FM_CLOSED_EXPLAIN=1 prints the exact
+#   haystack the gate matched and how many marked regions were stripped from it.
 #   --reopen-closed proceeds anyway, records reopened_closed=<slug> in meta, and prints a
 #   loud warning; it exists so the captain can authorise a reopen deliberately. It is a
 #   per-task authorisation, so batch dispatch REFUSES it (exit 2) rather than widening one
@@ -461,16 +462,19 @@ fi
 # reset while the topic itself still looks live. Closure is therefore enforced where
 # the work would START, not where it would be reported: by the time a report exists,
 # the attention has already been spent. Matched against the task id AND the brief with
-# fm-brief.sh's injected boilerplate sections stripped out (see bin/fm-closed-lib.sh
+# fm-brief.sh's marked boilerplate regions stripped out (see bin/fm-closed-lib.sh
 # for the register format and matching rule). Secondmate launches are exempt - they
 # carry a charter, not a task.
 #
-# The stripped sections are the conventions, setup, rules, freshness, access-routing,
-# fleet-map, project-memory and definition-of-done blocks fm-brief.sh injects into
-# every brief. Matching those too would let one unlucky keyword refuse every dispatch
-# in the fleet; a gate that fails closed on everything is worse than the failure it
-# was built to stop. Everything else in the brief - all of a hand-written one - stays
-# matched, so an unrecognised heading widens the haystack rather than narrowing it.
+# The stripped regions are the ones fm-brief.sh wrapped in its fm:boilerplate markers:
+# the conventions, setup, rules, freshness, access-routing, fleet-map, project-memory
+# and definition-of-done blocks it injects into every brief. Matching those too would
+# let one unlucky keyword refuse every dispatch in the fleet; a gate that fails closed
+# on everything is worse than the failure it was built to stop. Everything outside the
+# markers stays matched - all of a hand-written brief, and every line of a task body
+# including its own "# " headings - and an absent or unbalanced marker widens the
+# haystack rather than narrowing it, so the gate can never quietly cover less than the
+# captain believes. FM_CLOSED_EXPLAIN=1 shows exactly what was matched.
 REOPENED_CLOSED=
 if [ "$KIND" != secondmate ] && [ -f "$CLOSED" ]; then
   # A "- " line that is not a well-formed entry gates nothing, so say so out loud
@@ -488,6 +492,24 @@ if [ "$KIND" != secondmate ] && [ -f "$CLOSED" ]; then
   fi
   closed_hay=$(mktemp "${TMPDIR:-/tmp}/fm-closed.XXXXXX")
   { printf '%s\n' "$ID"; fm_closed_haystack_body "$BRIEF"; } > "$closed_hay"
+  # Narrowing the haystack is the one place this gate can quietly cover less than the
+  # captain believes, so it has to be inspectable rather than merely asserted to be
+  # correct: FM_CLOSED_EXPLAIN=1 shows what was dropped and what was actually matched.
+  case "${FM_CLOSED_EXPLAIN:-}" in
+    ''|0|false|no|off) : ;;
+    *)
+      closed_markers=$(fm_closed_marker_status "$BRIEF")
+      closed_marker_state=${closed_markers%% *}
+      closed_marker_count=${closed_markers##* }
+      [ "$closed_marker_state" = ok ] || closed_marker_count=0
+      {
+        echo "closed-topic gate: brief $BRIEF"
+        echo "closed-topic gate: boilerplate markers: $closed_marker_state, regions stripped: $closed_marker_count"
+        echo "closed-topic gate: haystack matched against $CLOSED follows"
+        sed 's/^/  | /' "$closed_hay"
+      } >&2
+      ;;
+  esac
   closed_hits=$(fm_closed_match "$CLOSED" "$closed_hay" || true)
   rm -f "$closed_hay"
   if [ -n "$closed_hits" ]; then

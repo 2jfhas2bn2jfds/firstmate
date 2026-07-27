@@ -415,15 +415,16 @@ fill_task() {
 }
 
 # The task body is free text firstmate writes, and it routinely contains its own
-# "# " lines: a fenced shell snippet whose first line is a comment, or a task that
-# structures itself with a heading. Extracting a "# Task" section would stop at the
-# first such line and stop matching everything after it - a closure silently covering
-# less than the captain believes, with no signal anywhere. So the stripper SUBTRACTS
-# known injected sections instead, and these cases prove a keyword after a stray
-# "# " line still refuses.
+# "# " lines: a fenced shell snippet whose first line is a comment, a task that
+# structures itself with a heading, or - in this repo especially - a task about the
+# brief scaffold that quotes a generated heading like "# Setup" verbatim. Any
+# stripper that infers boilerplate boundaries from heading TEXT stops matching from
+# that line on: a closure silently covering less than the captain believes, with no
+# signal anywhere. So boundaries come from explicit fm:boilerplate markers instead,
+# and these cases prove a keyword after any "# " line in the task still refuses.
 #
 # Run end to end on REAL generated briefs (the injected boilerplate has to be
-# present for the subtraction to mean anything), and paired with a negative control
+# present for the stripping to mean anything), and paired with a negative control
 # on the SAME register and SAME injected map: a matcher that had degenerated into
 # matching everything would pass both positives while proving nothing.
 test_closed_matches_task_body_after_hash_line() {
@@ -452,10 +453,24 @@ EOF
         hashline='# Acceptance criteria'
         printf '%s\n' 'Reproduce the export failure.' '' "$hashline" \
           '- the deleted user backlog drains cleanly' > "$body" ;;
-      3) # same shape, no closed keyword anywhere but the injected access map
+      3) # the task body quotes a heading the scaffold itself injects
+        hashline='# Setup'
+        printf '%s\n' 'Rewrite the brief scaffold section shown below.' '' \
+          "$hashline" 'the new text' '' \
+          'Then fix the deleted user backlog drain.' > "$body" ;;
+      4) # the task body quotes the LAST injected heading of the brief
+        hashline='# Definition of done'
+        printf '%s\n' 'Restate the scaffold section below.' '' "$hashline" \
+          'ship it, and drain the deleted user backlog first' > "$body" ;;
+      5) # same shape, no closed keyword anywhere but the injected access map
         hashline='# Acceptance criteria'
         printf '%s\n' 'Reproduce the export failure.' '' "$hashline" \
           '- notification preferences round-trip' > "$body" ;;
+      6) # a task quoting an injected heading, with no closed keyword at all
+        hashline='# Setup'
+        printf '%s\n' 'Rewrite the brief scaffold section shown below.' '' \
+          "$hashline" 'the new text' '' \
+          'Then check the notification preferences screen.' > "$body" ;;
     esac
     FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
       FM_STATE_OVERRIDE="$home/state" "$BRIEF_SH" "$id" alpha >/dev/null 2>&1
@@ -481,9 +496,107 @@ EOF
   done <<'ROWS'
 a keyword after a fenced "# install deps" line still refuses|match
 a keyword after the task's own "# Acceptance criteria" heading still refuses|match
+a keyword after a task body quoting the injected "# Setup" heading still refuses|match
+a keyword after a task body quoting "# Definition of done" still refuses|match
 control: the same shape with no closed keyword still spawns|nomatch
+control: a task quoting "# Setup" with no closed keyword still spawns|nomatch
 ROWS
   pass "gate 2: a \"# \" line inside the task body cannot silently narrow the haystack"
+}
+
+# Narrowing the haystack is the only place this gate can quietly cover less than the
+# captain believes, so it is allowed only where the marked regions are unambiguous.
+# Both uncertain cases must keep MORE text, never less: a brief with no markers at
+# all (hand-written, or generated before markers existed) and a brief whose markers
+# do not balance. The unbalanced case must additionally be LOUD, because that is the
+# case where the stripper cannot be confident and confidence is the precondition for
+# dropping anything.
+#
+# Each case is asserted by its OBSERVABLE consequence - the keyword that lives only
+# in injected boilerplate now refuses, because that boilerplate was kept - so the
+# test cannot pass by the stripper having merely stopped running.
+test_closed_marker_fallbacks_keep_whole_brief() {
+  local home wt out status brief
+  read -r home wt <<EOF
+$(spawnable_home closed-markers)
+EOF
+  printf -- '- Sentry: MCP-backed. reach: probe first.\n' > "$home/data/access.md"
+  printf '%s\n' \
+'- sentry-topic: Sentry: handled by the captain out of band (closed 2026-07-27)
+- deleted-user-backlog: deleted user backlog: closed by the captain (closed 2026-07-25)' \
+    > "$home/data/closed.md"
+
+  # Unbalanced markers: the whole brief is matched, so the keyword sitting only in
+  # the injected access map now refuses, and the stripper says why out loud.
+  FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
+    FM_STATE_OVERRIDE="$home/state" "$BRIEF_SH" markers-k1 alpha >/dev/null 2>&1
+  brief="$home/data/markers-k1/brief.md"
+  perl -0pi -e 's/\{TASK\}/Add a settings screen for notification preferences./' "$brief"
+  grep -q 'fm:boilerplate end' "$brief" || fail "markers-k1: the scaffold emitted no end marker"
+  perl -ni -e 'print unless /fm:boilerplate end/' "$brief"
+  out=$(run_spawnable "$home" "$wt" markers-k1 projects/alpha codex --why captain)
+  status=$?
+  expect_code 3 "$status" "unbalanced markers silently narrowed the haystack (got: $out)"
+  assert_contains "$out" "unbalanced fm:boilerplate markers" "unbalanced markers were not reported"
+  assert_contains "$out" "Matching the WHOLE brief" "the warning does not say what it fell back to"
+  assert_absent "$home/state/markers-k1.meta" "a refused spawn still wrote meta"
+
+  # No markers at all: a hand-written brief is matched whole, and there is no
+  # heading-text fallback, so a keyword after its own "# Setup" line still refuses.
+  write_brief "$home" markers-k2 \
+    'Rewrite the scaffold.\n\n# Setup\nthe new text\n\nThen fix the deleted user backlog drain.'
+  assert_no_grep "fm:boilerplate" "$home/data/markers-k2/brief.md" "hand-written brief carried markers"
+  out=$(run_spawnable "$home" "$wt" markers-k2 projects/alpha codex --why captain)
+  status=$?
+  expect_code 3 "$status" "an unmarked brief was narrowed by heading text (got: $out)"
+  assert_contains "$out" "- deleted-user-backlog: deleted user backlog:" \
+    "the closure line was not printed verbatim"
+  assert_not_contains "$out" "unbalanced fm:boilerplate markers" \
+    "a brief with no markers was reported as unbalanced"
+  assert_absent "$home/state/markers-k2.meta" "a refused spawn still wrote meta"
+
+  # Positive control that the marked path still narrows: same register, same map, a
+  # correctly marked brief whose task never mentions a closure spawns cleanly.
+  FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
+    FM_STATE_OVERRIDE="$home/state" "$BRIEF_SH" markers-k3 alpha >/dev/null 2>&1
+  perl -0pi -e 's/\{TASK\}/Add a settings screen for notification preferences./' \
+    "$home/data/markers-k3/brief.md"
+  out=$(run_spawnable "$home" "$wt" markers-k3 projects/alpha codex --why captain)
+  status=$?
+  expect_code 0 "$status" "control: a correctly marked brief was refused (got: $out)"
+  assert_present "$home/state/markers-k3.meta" "control: unrelated work did not spawn"
+  pass "gate 2: absent or unbalanced boilerplate markers keep the whole brief, and say so"
+}
+
+# "Capable of being loud" has to be real rather than asserted, so the narrowing is
+# inspectable on demand: FM_CLOSED_EXPLAIN prints the exact haystack the gate matched
+# and how many marked regions it removed, on stderr, without changing the verdict.
+test_closed_explain_shows_the_haystack() {
+  local home wt out status
+  read -r home wt <<EOF
+$(spawnable_home closed-explain)
+EOF
+  printf -- '- Sentry: MCP-backed. reach: probe first.\n' > "$home/data/access.md"
+  printf -- '- sentry-topic: Sentry: handled by the captain out of band (closed 2026-07-27)\n' \
+    > "$home/data/closed.md"
+  FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
+    FM_STATE_OVERRIDE="$home/state" "$BRIEF_SH" explain-m1 alpha >/dev/null 2>&1
+  perl -0pi -e 's/\{TASK\}/Add a settings screen for notification preferences./' \
+    "$home/data/explain-m1/brief.md"
+  out=$(FM_CLOSED_EXPLAIN=1 run_spawnable "$home" "$wt" explain-m1 projects/alpha codex --why captain)
+  status=$?
+  expect_code 0 "$status" "FM_CLOSED_EXPLAIN changed the gate verdict (got: $out)"
+  assert_contains "$out" "boilerplate markers: ok, regions stripped:" "explain did not report the marker state"
+  assert_contains "$out" "| Add a settings screen" "explain did not print the matched haystack"
+  assert_not_contains "$out" "| - Sentry: MCP-backed" "the printed haystack still carried stripped boilerplate"
+  # Off by default: the haystack must not appear in ordinary spawn output.
+  FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
+    FM_STATE_OVERRIDE="$home/state" "$BRIEF_SH" explain-m2 alpha >/dev/null 2>&1
+  perl -0pi -e 's/\{TASK\}/Add a settings screen for notification preferences./' \
+    "$home/data/explain-m2/brief.md"
+  out=$(run_spawnable "$home" "$wt" explain-m2 projects/alpha codex --why captain)
+  assert_not_contains "$out" "haystack matched against" "the explain diagnostic is on by default"
+  pass "gate 2: FM_CLOSED_EXPLAIN makes the narrowing inspectable without changing it"
 }
 
 # A "- " line that is not a well-formed entry closes NOTHING, so it must get LOUDER,
@@ -785,6 +898,8 @@ test_closed_matching_precision
 test_closed_ignores_non_entries
 test_closed_ignores_injected_boilerplate
 test_closed_matches_task_body_after_hash_line
+test_closed_marker_fallbacks_keep_whole_brief
+test_closed_explain_shows_the_haystack
 test_closed_malformed_line_is_loud
 test_closed_absent_register
 test_meta_records_provenance

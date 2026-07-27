@@ -364,7 +364,9 @@ The tag and note are recorded as `why=` in the task's meta.
 
 **A closed topic refuses at the spawn call.**
 The script matches the task id and the brief, minus the boilerplate `fm-brief.sh` injects into every brief, against `data/closed.md` and refuses, printing the closure line, when they hit; `--reopen-closed` proceeds and records `reopened_closed=<slug>` in meta, and is only for a reopen the captain explicitly authorised.
-The injected conventions, setup, rules, freshness, access, fleet-map, project-memory and definition-of-done sections are stripped, so a keyword landing in them cannot refuse every dispatch in the fleet; everything else in the brief stays matched, including a task body with its own `# ` headings, so an unrecognized heading widens the haystack rather than silently narrowing it.
+The injected conventions, setup, rules, freshness, access, fleet-map, project-memory and definition-of-done blocks are stripped by the explicit `fm:boilerplate` markers the scaffold wraps them in, so a keyword landing in them cannot refuse every dispatch in the fleet.
+Boundaries never come from heading text, so everything outside those markers stays matched, including a task body carrying its own `# ` headings or quoting a generated one verbatim; a brief with no markers or unbalanced ones is matched whole (loudly, in the unbalanced case), so the narrowing widens the haystack rather than silently shrinking it.
+`FM_CLOSED_EXPLAIN=1` prints the exact haystack a spawn matched and how many marked regions it stripped.
 Add a closure line when the captain closes a topic: `- <slug>: <comma-separated keywords>: <one-line why> (closed <date>)`, with specific multi-word keywords (a bare generic word blocks unrelated work).
 A `- ` line that is not a well-formed entry closes nothing and is warned about rather than skipped, on stderr at the spawn call and as a `CLOSED_TOPICS_MALFORMED:` line at bootstrap; fix or remove the line, because until then the captain believes that topic is closed and it is not.
 
@@ -702,6 +704,7 @@ Ship briefs also include the project-memory contract: run `bin/fm-ensure-agents-
 Ship and scout briefs also carry an access-and-routing section and the matching access-wall rule: a crewmate probes a capability once, uses it if the probe answers, and escalates a failed probe as `blocked:` instead of downgrading its answer into a caveat.
 The scaffold appends this home's `data/access.md` under that section as the fleet access map, so the inventory stays local and current while the routing rule stays shared; it is a graceful no-op when the file is absent.
 Keep `data/access.md` accurate and mark firstmate-only capabilities explicitly: crew reach varies by harness and pane, so an inventory asserted rather than probed is the same stale-confidence failure the freshness rule guards against.
+Every block the scaffold injects into a ship or scout brief is wrapped in `<!-- fm:boilerplate start -->` / `<!-- fm:boilerplate end -->` markers, which is how the closed-topic gate tells generated text from the task you wrote (section 7); leave them in place, and put the task description where the `{TASK}` placeholder sits rather than inside a marked region.
 For scout tasks add `--scout`: the scaffold swaps the definition of done for the report contract (findings to `data/<id>/report.md`, no branch, no push, no PR) and declares the worktree scratch; scout is mode-agnostic.
 Scout briefs do not include the project-memory step, because their deliverable is a report rather than a committed project change.
 For secondmates use `bin/fm-brief.sh <id> --secondmate <project>...`.

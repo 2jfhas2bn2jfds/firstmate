@@ -39,12 +39,25 @@
 # captain's "## Engineering conventions" section from data/captain.md injected near
 # the top, so the conventions reach every crewmate at spawn; it is a graceful no-op
 # when captain.md or that section is absent.
+# Every block this script injects into a ship or scout brief is wrapped in the
+# <!-- fm:boilerplate start --> / <!-- fm:boilerplate end --> markers, so the
+# closed-topic gate can subtract generated text from its haystack by exact marker
+# instead of by heading text a task body may legitimately quote
+# (see bin/fm-closed-lib.sh). Anything outside those markers is task-specific.
 # Refuses to overwrite an existing brief.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-marker-lib.sh
 . "$SCRIPT_DIR/fm-marker-lib.sh"
+# For FM_CLOSED_BOILERPLATE_START/END: every block injected below is wrapped in those
+# markers so the closed-topic gate can subtract it from the haystack by exact marker
+# rather than by guessing at heading text a task body may also contain. The constants
+# live with the consumer that must recognise them, so the two cannot drift apart.
+# shellcheck source=bin/fm-closed-lib.sh
+. "$SCRIPT_DIR/fm-closed-lib.sh"
+BP_START=$FM_CLOSED_BOILERPLATE_START
+BP_END=$FM_CLOSED_BOILERPLATE_END
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
@@ -99,7 +112,13 @@ captain_conventions_body() {
 # nothing in stale content distinguishes it from current content, so the only
 # available signal is an explicit fetch tag that a crewmate must either produce or
 # visibly fail to produce.
-FRESHNESS_BLOCK=$(cat <<'EOF'
+#
+# Built from a function, like access_block_text below, so the heredoc is never
+# lexically nested inside the $(...) that captures it: bash 3.2 (macOS) mis-parses an
+# apostrophe in that shape and fails brief generation outright. The function form makes
+# that structural rather than a property of the text happening to avoid apostrophes.
+freshness_block_text() {
+  cat <<'EOF'
 
 # Freshness provenance (required)
 Any claim you make about LIVE state must carry an inline provenance tag: `[fetched <source> <ISO-8601 timestamp>]`.
@@ -109,7 +128,8 @@ An untagged live-state claim is UNVERIFIED. Write it as unverified ("not checked
 Specificity is not freshness. A detailed, confident, internally consistent description of a live artefact reads exactly the same whether it was fetched a minute ago or is months out of date, so detail is never evidence of recency and neither is your own confidence.
 If you cannot fetch it, say so plainly and say what you would have needed. Do not reconstruct live state from memory, from a previous report, from a cached export, or from the repo, and then present it as current.
 EOF
-)
+}
+FRESHNESS_BLOCK=$(freshness_block_text)
 # The per-fleet access map, injected under the structural access section below.
 # Kept in this home's data/access.md - LOCAL and gitignored, because which
 # connectors, credentials and consoles exist is captain-specific while the routing
@@ -239,11 +259,15 @@ REPO=${POS[1]}
 
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
+$BP_START
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 ${CONVENTIONS_BLOCK}
+$BP_END
+
 # Task
 {TASK}
 
+$BP_START
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
 This is a SCOUT task: the deliverable is a written report, not a PR.
@@ -277,6 +301,7 @@ Write your findings to \`$DATA/$ID/report.md\`.
 The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references), and what you recommend.
 When the report is complete, append \`done: {one-line conclusion}\` to the status file and stop.
 If your findings reveal work that should ship (e.g. you reproduced a bug and the fix is clear), say so in the report; firstmate may promote this task in place, and you would then receive mode-specific ship instructions as a follow-up message.
+$BP_END
 EOF
 echo "scaffolded: $BRIEF (scout; replace {TASK})"
 exit 0
@@ -305,11 +330,15 @@ case "$MODE" in
 esac
 
 cat > "$BRIEF" <<EOF
+$BP_START
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 ${CONVENTIONS_BLOCK}
+$BP_END
+
 # Task
 {TASK}
 
+$BP_START
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
 
@@ -346,6 +375,7 @@ ${ACCESS_BLOCK}
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
 If this task produced durable project-intrinsic knowledge, record it in \`AGENTS.md\` as part of your change.
 Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
+$BP_END
 EOF
 
 # Append the mode-specific definition of done as a direct heredoc (never inside a
@@ -357,27 +387,32 @@ case "$MODE" in
   direct-PR)
     cat >> "$BRIEF" <<EOF
 
+$BP_START
 # Definition of done
 This project ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
 When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
 Do NOT run /no-mistakes. The captain reviews and merges the PR; firstmate relays it.
+$BP_END
 EOF
     ;;
   local-only)
     cat >> "$BRIEF" <<EOF
 
+$BP_START
 # Definition of done
 This project ships **local-only**: no remote, no PR, no pipeline.
 The task is complete only when committed on your branch \`fm/$ID\`. Do NOT push, do NOT open a PR, do NOT merge.
 Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
 When it is implemented and committed, append \`done: ready in branch fm/$ID\` to the status file and stop.
 Firstmate then reviews your branch diff, the captain approves, and firstmate merges it into local \`main\`.
+$BP_END
 EOF
     ;;
   *)  # no-mistakes (default)
     cat >> "$BRIEF" <<EOF
 
+$BP_START
 # Definition of done
 The task is complete only when committed on your branch.
 When you believe it is complete, append \`done: {summary}\` to the status file and stop.
@@ -393,6 +428,7 @@ Two firstmate-specific rules layer on top of that guidance:
 - Avoid \`--yes\`: the captain, not you, owns the ask-user decisions it would silently auto-resolve.
 
 After /no-mistakes reports CI green, append \`done: PR {url} checks green\` and stop. You are finished.
+$BP_END
 EOF
     ;;
 esac

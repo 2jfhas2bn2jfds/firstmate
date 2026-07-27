@@ -38,8 +38,11 @@ A silent skip would leave the captain believing a topic is closed while the gate
 
 Matching normalizes case and punctuation and requires whole-token phrase hits, so `post-deletion`, `Post Deletion`, and a phrase wrapped across a line break all match, while `billings` does not match `billing`.
 Breadth is the operator's lever: a one-word generic keyword blocks unrelated work that merely mentions it, so entries should carry specific multi-word phrases.
-The haystack is the task id plus the brief with `bin/fm-brief.sh`'s injected boilerplate sections stripped out (conventions, setup, rules, freshness, access and routing, fleet access map, project memory, definition of done), so a keyword that happens to appear in that boilerplate cannot refuse the whole fleet's dispatch.
-Everything else in the brief stays matched, including a task body that carries its own `# ` headings or fenced snippets: the stripper subtracts known sections rather than extracting one, so an unrecognized heading widens the haystack (a loud false refusal, undone with one flag) instead of narrowing it (a closure silently covering less than the captain believes).
+The haystack is the task id plus the brief with `bin/fm-brief.sh`'s injected boilerplate stripped out (conventions, setup, rules, freshness, access and routing, fleet access map, project memory, definition of done), so a keyword that happens to appear in that boilerplate cannot refuse the whole fleet's dispatch.
+Those regions are identified by the explicit `<!-- fm:boilerplate start -->` / `<!-- fm:boilerplate end -->` markers the scaffold emits around each block it injects, never by heading text, so everything outside them stays matched: a task body is free text and may legitimately carry its own `# ` headings, fenced snippets, or a verbatim quote of a generated heading such as `# Setup`.
+Both uncertain cases keep the whole brief rather than dropping any of it: a brief with no markers at all (hand-written, or generated before markers existed) is matched whole with no heading-text fallback, and a brief whose markers do not balance is matched whole and reported on stderr.
+Narrowing therefore fails toward a loud false refusal, undone with one flag, rather than toward a closure silently covering less than the captain believes.
+Set `FM_CLOSED_EXPLAIN=1` on a spawn to print the exact haystack the gate matched and how many marked regions were stripped.
 `--reopen-closed` is the one authorised bypass; it records `reopened_closed=<slug>` in the task's meta and is refused in batch dispatch, so one captain-authorised reopen never widens into a blanket bypass for every pair.
 
 ## Fleet access map (data/access.md)
@@ -173,6 +176,7 @@ FM_CHECK_INTERVAL=300   # seconds between slow checks (merge polls or the X-mode
 FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh
 FM_CREW_STATE_BIN=bin/fm-crew-state.sh   # test override for the current-state reader used by provably-working watcher triage
+FM_CLOSED_EXPLAIN=      # truthy makes a spawn print, on stderr, the exact haystack the closed-topic gate matched and how many marked boilerplate regions were stripped from the brief; diagnostic only, it never changes the verdict
 FM_KEEP_MODEL_ENV=      # truthy keeps the model-selection env family at agent launch instead of stripping it, for Bedrock/Vertex setups that select the model that way; read from the environment only, never from this home's .env, so set it where every firstmate home inherits it (a shell profile or the tmux environment, the same place those model variables are set), because a launched pane inherits the tmux session environment rather than the environment of the process that ran fm-spawn, so setting it only in one agent's own process environment never reaches a secondmate or the crewmates that secondmate spawns
 FMX_PAIRING_TOKEN=      # X mode pairing token; .env opt-in authorizes replies and eligible lifecycle actions
 FMX_RELAY_URL=https://myfirstmate.io   # optional X relay override, mainly for local relay development
