@@ -574,9 +574,14 @@ fi
 # --reopen-closed, and this check must not be stricter than the closure gate. Like
 # that flag it is loud and recorded in meta, so the waiver leaves a trace.
 brief_has_unfilled_task() {
-  awk -v heading='# Task' '
+  awk '
     function trim(t) { sub(/^[ \t]+/, "", t); sub(/[ \t\r]+$/, "", t); return t }
-    { all[n++] = $0; if (!start && trim($0) == heading) start = n }
+    # Anchor on the COLUMN-ZERO heading fm-brief.sh emits, not on any line whose
+    # trimmed text happens to match. An indented "# Task" can reach the brief inside
+    # a fenced example in the captain-authored conventions, and anchoring there moves
+    # the scan above the real task section and re-enables fence tracking across
+    # exactly the truncated-mid-fence region this scoping exists to exclude.
+    { all[n++] = $0; if (!start && $0 ~ /^# Task[ \t\r]*$/) start = n }
     END {
       # NO TASK HEADING MEANS NO FENCE TRACKING AT ALL. Fences are read only inside
       # the task section, where the structure is known; a brief with no task heading
@@ -652,10 +657,14 @@ fi
 # every brief. Matching those too would let one unlucky keyword refuse every dispatch in
 # the fleet; a gate that fails closed on everything is worse than the failure it was built
 # to stop. Everything else stays matched - all of a hand-written brief, and every line of a
-# task body including its own "# " headings and any marker pair it quotes - and an absent
-# marker, an unbalanced marker, or a marked region that does not open with a generated
-# heading widens the haystack rather than narrowing it, so the gate can never quietly cover
-# less than the captain believes. FM_CLOSED_EXPLAIN=1 shows exactly what was matched.
+# task body including its own "# " headings and any marker pair it quotes around text that
+# is not itself a generated section - and an absent marker, an unbalanced marker, or a
+# marked region that does not open with a generated heading widens the haystack rather than
+# narrowing it, so the gate can never quietly cover less than the captain believes. The one
+# case that does narrow is where both signals still agree: a task body pasting a COMPLETE
+# injected block verbatim, markers and generated heading intact, is stripped like the real
+# thing. That is the accepted intersection of the two holes either signal has alone.
+# FM_CLOSED_EXPLAIN=1 shows exactly what was matched.
 REOPENED_CLOSED=
 # An unresolvable register is not "no closures set": it is the gate having no idea
 # what the captain closed, which is exactly the state that must never pass quietly.

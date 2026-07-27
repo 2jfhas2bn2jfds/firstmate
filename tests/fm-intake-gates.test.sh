@@ -918,8 +918,11 @@ ROWS
 # writes has the same effect. Tracked across the whole brief, that hanging fence
 # swallowed the placeholder line and the brief read as FILLED: the crewmate spawned on
 # a placeholder AND gate 2 went vacuous on the same brief, silently, because of text
-# written in a different file entirely. Run on REAL generated briefs, because the
-# truncation only exists in a brief the scaffold produced.
+# written in a different file entirely. An INDENTED heading in those conventions is the
+# same failure by another route: it survives the cut a column-zero one terminates, so
+# anchoring on trimmed text rather than the column-zero heading the scaffold emits moves
+# the scan back above the task section and re-enables that tracking. Run on REAL
+# generated briefs, because the truncation only exists in a brief the scaffold produced.
 test_unfilled_brief_survives_conventions_fence() {
   local home wt out status label conventions id n=0
   read -r home wt <<EOF
@@ -941,6 +944,7 @@ EOF
   done <<'ROWS'
 fenced conventions example holding a heading|- Briefs look like this:\n\n```markdown\n# Task\nthe actual task\n```\n\n- No em dashes.\n
 unbalanced fence in the conventions|- Start every snippet like this:\n\n```sh\nset -euo pipefail\n
+indented task heading in a conventions fence|- Briefs look like this:\n\n```markdown\n  # Task\n  the actual task\n```\n
 ROWS
 
   # Positive controls on the SAME captain.md, so neither pass above can be the check
@@ -966,6 +970,46 @@ ROWS
   assert_not_contains "$out" "never filled in" "control: the refusal fired on a fenced demo"
   assert_present "$home/state/convfence-fenced.meta" "control: a legitimate brief did not spawn"
   pass "spawn: a fence in the injected conventions cannot hide an unfilled task section"
+}
+
+# Only the column-zero heading fm-brief.sh emits may anchor the scan. An INDENTED
+# "# Task" survives the cut that copies data/captain.md's conventions into the brief
+# (a column-zero one terminates that cut, so it never arrives), and anchoring on
+# trimmed text instead puts the scan back above the task section with fence tracking
+# running across the conventions tail - the exact state the scoping removes. The
+# observable cost is a legitimate brief refused with no way through but a waiver, so
+# this pins that direction explicitly rather than through another test's controls.
+test_unfilled_task_anchor_ignores_indented_heading() {
+  local home wt out status
+  read -r home wt <<EOF
+$(spawnable_home unfilled-indented)
+EOF
+  printf '%b\n' '# Captain\n\n## Engineering conventions\n\n- Briefs look like this:\n\n```markdown\n  # Task\n  the actual task\n```\n' \
+    > "$home/data/captain.md"
+
+  FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
+    FM_STATE_OVERRIDE="$home/state" "$BRIEF_SH" indented-demo alpha >/dev/null 2>&1
+  assert_grep '  # Task' "$home/data/indented-demo/brief.md" \
+    "the fixture brief did not carry the indented conventions heading"
+  printf '%b\n' 'Rewrite the scaffold so the task section:\n\n```markdown\n# Task\n{TASK}\n```\n\nis replaced before spawning.' \
+    > "$TMP_ROOT/indented-body.txt"
+  fill_task "$home/data/indented-demo/brief.md" "$TMP_ROOT/indented-body.txt"
+  out=$(run_spawnable "$home" "$wt" indented-demo projects/alpha codex --why captain)
+  status=$?
+  expect_code 0 "$status" "an indented conventions heading moved the scan and refused a filled brief (got: $out)"
+  assert_not_contains "$out" "never filled in" "the unfilled-brief refusal fired on a filled brief"
+  assert_present "$home/state/indented-demo.meta" "a legitimate brief did not spawn"
+
+  # Positive control on the SAME captain.md: the check still refuses a genuinely
+  # unfilled brief, so the pass above cannot be the check having stopped firing.
+  FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
+    FM_STATE_OVERRIDE="$home/state" "$BRIEF_SH" indented-unfilled alpha >/dev/null 2>&1
+  out=$(run_spawnable "$home" "$wt" indented-unfilled projects/alpha codex --why captain)
+  status=$?
+  expect_code 4 "$status" "control: an unfilled brief spawned anyway (got: $out)"
+  assert_contains "$out" "the brief was never filled in" "control: the refusal text changed"
+  assert_absent "$home/state/indented-unfilled.meta" "control: a refused spawn still wrote meta"
+  pass "spawn: only the scaffold's own column-zero '# Task' heading anchors the scan"
 }
 
 # The unfilled check REFUSES when it cannot tell, which is the opposite of the
@@ -1642,6 +1686,7 @@ test_unfilled_brief_refuses
 test_placeholder_mention_in_task_body_spawns
 test_placeholder_inside_fence_spawns
 test_unfilled_brief_survives_conventions_fence
+test_unfilled_task_anchor_ignores_indented_heading
 test_unfilled_brief_unbalanced_task_fence_refuses
 test_unfilled_brief_without_task_heading_refuses
 test_allow_unfilled_task_override

@@ -46,8 +46,10 @@
 # (see bin/fm-closed-lib.sh). Anything outside those markers is task-specific.
 # The gate drops a marked region only when it ALSO opens with one of the section
 # openers listed in FM_CLOSED_INJECTED_OPENERS, so a task body that quotes the marker
-# pair keeps its text; renaming a heading below without updating that list keeps the
-# region in the haystack, which is the safe direction but worth fixing.
+# pair around anything but a generated section keeps its text; a body that pastes a
+# complete injected block verbatim is stripped, which is the accepted residual.
+# Renaming a heading below without updating that list keeps the region in the
+# haystack, which is the safe direction but worth fixing.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -194,13 +196,20 @@ Settle it in this order:
 Firstmate's own session holds the fleet's connectors and credentials and can usually answer a specific question in a single call. So an access wall is a routing problem with a fast fix, not a limit on what the answer can be. The one thing that makes it permanent is you absorbing it silently.
 EOF
 }
-ACCESS_BLOCK=$(access_block_text)
-ACCESS_BODY=$(fleet_access_body)
-if [ -n "$ACCESS_BODY" ]; then
-  ACCESS_BLOCK="$ACCESS_BLOCK
+# Resolved only for the briefs that carry it. A charter never does, so resolving it
+# there would print the unreachable-register warning about an artifact that could not
+# have used the map anyway, and a warning that fires where it cannot apply is how the
+# ones that do apply stop being read.
+ACCESS_BLOCK=""
+if [ "$KIND" != secondmate ]; then
+  ACCESS_BLOCK=$(access_block_text)
+  ACCESS_BODY=$(fleet_access_body)
+  if [ -n "$ACCESS_BODY" ]; then
+    ACCESS_BLOCK="$ACCESS_BLOCK
 
 ## Fleet access map
 $ACCESS_BODY"
+  fi
 fi
 CONV_BODY=$(captain_conventions_body)
 CONVENTIONS_BLOCK=""
