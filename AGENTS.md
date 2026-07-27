@@ -81,7 +81,7 @@ data/                personal fleet records; LOCAL, gitignored as a whole
   projects.md        thin fleet navigation registry; firstmate-private, parsed by fm-project-mode.sh (section 6)
   secondmates.md      secondmate routing table; firstmate-private, maintained by fm-home-seed.sh (section 6)
   access.md          fleet access map: what access exists, where it lives, and how a crew reaches it (marking firstmate-only capabilities); LOCAL, gitignored, injected into every ship and scout brief by fm-brief.sh (section 11)
-  closed.md          topics the captain has closed; LOCAL, gitignored (closures are captain-specific, the mechanism is shared). fm-spawn refuses any ship/scout spawn matching one (section 7); bootstrap reports the count and slugs (section 3)
+  closed.md          topics the captain has closed; LOCAL, gitignored (closures are captain-specific, the mechanism is shared). fm-spawn refuses any ship/scout spawn matching one (section 7); bootstrap reports the count and slugs, and names any malformed line that closes nothing (section 3)
   <id>/brief.md      per-task crewmate brief, or per-secondmate charter brief when kind=secondmate
   <id>/report.md     scout task deliverable, written by the crewmate; survives teardown
 projects/            cloned repos; gitignored; READ-ONLY for you
@@ -139,6 +139,7 @@ Otherwise it prints one line per problem or capability fact; handle each:
 - `FLEET_SYNC: <repo>: STUCK: on <state>, N commits behind <base> - needs attention` - the clone is dirty, on a non-default branch, detached with unique commits, or diverged, so the sync left it untouched (never forcing or discarding); it will keep falling behind until you look. A loud STUCK, especially a growing N across bootstraps, means that clone needs hands-on attention; dispatch a crewmate or resolve it before it strands work.
 - `SECONDMATE_SYNC: secondmate <id>: skipped: <reason>` - the local-HEAD secondmate sync left a live secondmate home on its existing checkout because the home was dirty, diverged, unsafe, on the wrong branch, missing the primary target commit, or otherwise not fast-forwardable; bootstrap continued, but inspect the reason because the secondmate may be stale after a primary update.
 - `CLOSED_TOPICS: <n> closed at intake: <slugs>` - the topics the captain has closed, listed so they are visible before any dispatch decision; `fm-spawn.sh` refuses a ship or scout spawn that matches one (section 7). Not a problem to fix: record it and do not reopen any of them without the captain's explicit word.
+- `CLOSED_TOPICS_MALFORMED: closes nothing, fix or remove: <line>` - a `data/closed.md` line that starts with `- ` but is not a well-formed entry, so it closes nothing while looking like a closure. This IS a problem to fix: repair the line to `- <slug>: <comma-separated keywords>: <one-line why> (closed <date>)`, or delete it, and confirm with the captain what that topic's closure should be.
 - `TASKS_AXI: available` - an optional capability fact, not a problem; record it silently and use section 10 for backlog mutations.
   It prints only after the `tasks-axi` compatibility probe passes for version 0.1.1 or newer; absence or incompatibility only falls back to hand-editing and never blocks work.
 - `NUDGE_SECONDMATES: <window-targets...>` - the secondmate sweep fast-forwarded one or more *running* secondmate homes to firstmate's current version and their instructions actually changed; for each listed window, send a one-line re-read nudge with `bin/fm-send.sh <window-target> 'firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions.'` so that secondmate picks up its new instructions.
@@ -362,10 +363,13 @@ The tag and note are recorded as `why=` in the task's meta.
 `--secondmate` is exempt: launching a persistent supervisor is lifecycle, not work.
 
 **A closed topic refuses at the spawn call.**
-The script matches the task id and the brief text against `data/closed.md` and refuses, printing the closure line, when they hit; `--reopen-closed` proceeds and records `reopened_closed=<slug>` in meta, and is only for a reopen the captain explicitly authorised.
+The script matches the task id and the brief's `# Task` section against `data/closed.md` and refuses, printing the closure line, when they hit; `--reopen-closed` proceeds and records `reopened_closed=<slug>` in meta, and is only for a reopen the captain explicitly authorised.
+Only the task-specific section is matched, never the boilerplate `fm-brief.sh` injects into every brief, so a keyword landing in the conventions, freshness, access, or fleet-map blocks cannot refuse every dispatch in the fleet.
 Add a closure line when the captain closes a topic: `- <slug>: <comma-separated keywords>: <one-line why> (closed <date>)`, with specific multi-word keywords (a bare generic word blocks unrelated work).
+A `- ` line that is not a well-formed entry closes nothing and is warned about rather than skipped, on stderr at the spawn call and as a `CLOSED_TOPICS_MALFORMED:` line at bootstrap; fix or remove the line, because until then the captain believes that topic is closed and it is not.
 
 Dispatch several tasks in one call by passing `id=repo` pairs instead of a single `<id> <project>`; each pair is spawned through the same single-task path, a shared `--scout` and a shared `--why` apply to all, and the looping happens inside the script so you never hand-write a multi-task shell loop.
+Batch dispatch refuses `--reopen-closed`: a reopen is a per-task authorisation, so spawn that one task on its own and batch the rest.
 If one pair fails, the rest still run and the batch exits non-zero.
 
 The script resolves the harness (`fm-harness.sh crew`), owns the verified launch templates, resolves the project's delivery mode (`fm-project-mode.sh`) for ship/scout tasks, and records `harness=`, `kind=`, `mode=`, and `yolo=` in the task's meta; a non-flag third argument containing whitespace is treated as a raw launch command (only for verifying new adapters).

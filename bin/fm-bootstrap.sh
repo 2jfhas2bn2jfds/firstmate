@@ -434,13 +434,21 @@ liveness_daemon_ensure() {
 # session start so the closures are visible before any dispatch decision is made,
 # rather than only surfacing as a refusal later. Silent when the register is absent
 # or holds no entries: bootstrap's contract is that silence means all good.
+#
+# A "- " line that is not a well-formed entry is NOT all good: it closes nothing
+# while looking like a closure, so it is reported line by line rather than skipped.
+# The count of well-formed slugs cannot show that, because nobody counts.
 closed_topics_report() {
-  local register="$DATA/closed.md" slugs count
+  local register="$DATA/closed.md" slugs malformed count
   [ -f "$register" ] || return 0
-  slugs=$(fm_closed_slugs "$register" | paste -sd, - | sed 's/,/, /g')
+  malformed=$(fm_closed_malformed "$register")
+  if [ -n "$malformed" ]; then
+    printf '%s\n' "$malformed" | sed 's/^/CLOSED_TOPICS_MALFORMED: closes nothing, fix or remove: /'
+  fi
+  slugs=$(fm_closed_slugs "$register")
   [ -n "$slugs" ] || return 0
-  count=$(fm_closed_slugs "$register" | grep -c . || true)
-  echo "CLOSED_TOPICS: $count closed at intake: $slugs"
+  count=$(printf '%s\n' "$slugs" | wc -l | tr -d ' ')
+  echo "CLOSED_TOPICS: $count closed at intake: $(printf '%s\n' "$slugs" | paste -sd, - | sed 's/,/, /g')"
 }
 
 if [ "${1:-}" = "install" ]; then

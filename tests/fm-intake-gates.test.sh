@@ -215,6 +215,32 @@ test_why_gate_batch() {
   pass "gate 1: batch takes one shared --why, validated once and forwarded to every pair"
 }
 
+# --reopen-closed is the ONE designed bypass of gate 2, and it is authorisation for
+# ONE topic. Forwarding it to every pair would silently widen a single captain
+# authorisation into a blanket bypass, so batch dispatch refuses it outright and the
+# whole batch stops before any pair spawns.
+test_reopen_closed_refused_in_batch() {
+  local home out status
+  home=$(new_home reopen-batch)
+  out=$(run_spawn "$home" rb-n1=projects/alpha rb-n2=projects/alpha --why captain --reopen-closed)
+  status=$?
+  expect_code 2 "$status" "batch --reopen-closed"
+  assert_contains "$out" "--reopen-closed is not accepted in batch dispatch" \
+    "batch --reopen-closed was not refused"
+  assert_contains "$out" "per-task authorisation" "refusal does not explain why the bypass stays narrow"
+  assert_not_contains "$out" "batch:" "batch --reopen-closed still dispatched pairs"
+  assert_absent "$home/state/rb-n1.meta" "a refused batch still wrote meta"
+
+  # Positive control: the same batch without the flag DOES dispatch both pairs, so
+  # the refusal above is the flag being rejected rather than batch mode being broken.
+  out=$(run_spawn "$home" rb-n1=projects/alpha rb-n2=projects/alpha --why captain)
+  status=$?
+  [ "$status" -ne 0 ] || fail "batch with missing briefs should exit non-zero"
+  assert_contains "$out" "batch: FAILED to spawn rb-n1" "control batch did not dispatch the first pair"
+  assert_contains "$out" "batch: FAILED to spawn rb-n2" "control batch did not dispatch the second pair"
+  pass "gate 2: batch dispatch refuses --reopen-closed instead of widening it to every pair"
+}
+
 # --- gate 2: closed topics --------------------------------------------------
 
 # fixture_home <name> <register-content>: a home carrying a closed-topic register.
@@ -329,6 +355,93 @@ EOF
   status=$?
   expect_code 0 "$status" "a comment/prose/malformed register line was treated as a closure (got: $out)"
   pass "gate 2: comments, prose, and malformed lines in the register never gate work"
+}
+
+# The haystack is the task id plus the brief's TASK section, never the boilerplate
+# fm-brief.sh injects into every ship and scout brief. A closure keyword landing in
+# the conventions, freshness, access-routing or fleet-map blocks would otherwise
+# match EVERY generated brief and refuse EVERY dispatch in the fleet - a control
+# that fails closed on everything is worse than the problem it solves.
+#
+# Asserted end to end on a REAL generated brief, because the bug lives in the
+# interaction between the scaffold's injection and the matcher, and cannot be seen
+# with the hand-written briefs the other cases use. Paired with a positive control
+# on the SAME register and the SAME injected map: a matcher that had simply stopped
+# working would pass the negative while proving nothing.
+test_closed_ignores_injected_boilerplate() {
+  local home wt out status brief
+  read -r home wt <<EOF
+$(spawnable_home closed-boilerplate)
+EOF
+  # The keyword appears ONLY in the injected fleet access map, never in any task.
+  printf -- '- Sentry: MCP-backed. reach: probe first.\n' > "$home/data/access.md"
+  printf -- '- sentry-topic: Sentry: handled by the captain out of band (closed 2026-07-27)\n' \
+    > "$home/data/closed.md"
+
+  for id in boilerplate-n1 boilerplate-n2; do
+    FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
+      FM_STATE_OVERRIDE="$home/state" "$BRIEF_SH" "$id" alpha >/dev/null 2>&1
+    brief="$home/data/$id/brief.md"
+    assert_grep "Sentry" "$brief" "$id: the injected access map did not carry the keyword"
+  done
+
+  # Negative: an unrelated task whose "# Task" section never mentions the closure.
+  perl -0pi -e 's/\{TASK\}/Add a settings screen for notification preferences./' \
+    "$home/data/boilerplate-n1/brief.md"
+  out=$(run_spawnable "$home" "$wt" boilerplate-n1 projects/alpha codex --why captain)
+  status=$?
+  expect_code 0 "$status" "a keyword present only in injected brief boilerplate refused unrelated work (got: $out)"
+  assert_present "$home/state/boilerplate-n1.meta" "unrelated work did not spawn"
+
+  # Positive control: same register, same injected map, keyword in the TASK body.
+  perl -0pi -e 's/\{TASK\}/Check the Sentry issue rate for the login flow./' \
+    "$home/data/boilerplate-n2/brief.md"
+  out=$(run_spawnable "$home" "$wt" boilerplate-n2 projects/alpha codex --why captain)
+  status=$?
+  expect_code 3 "$status" "positive control: a keyword in the task body did not refuse"
+  assert_contains "$out" "this topic is CLOSED" "positive control: no closure refusal"
+  assert_absent "$home/state/boilerplate-n2.meta" "a refused spawn still wrote meta"
+  pass "gate 2: only the task section is matched, so injected brief boilerplate cannot gate the fleet"
+}
+
+# A "- " line that is not a well-formed entry closes NOTHING, so it must get LOUDER,
+# not quieter: a typo'd closure that fails silently disarms the gate while the
+# captain believes the topic is closed. Warned at the spawn call and at bootstrap,
+# naming the offending line, without blocking an unrelated task. Comments, blank
+# lines, and prose stay silent, because those are notes rather than attempted
+# closures.
+test_closed_malformed_line_is_loud() {
+  local home wt out status
+  read -r home wt <<EOF
+$(spawnable_home closed-malformed)
+EOF
+  printf '%s\n' \
+'# a comment must stay silent
+- good-topic: deleted user backlog: closed by the captain (closed 2026-07-25)
+- oops-this-entry-has-no-second-colon
+this prose line must stay silent' > "$home/data/closed.md"
+  write_brief "$home" malformed-o1 'Add a settings screen for notification preferences.'
+  out=$(run_spawnable "$home" "$wt" malformed-o1 projects/alpha codex --why captain)
+  status=$?
+  expect_code 0 "$status" "a malformed register line blocked an unrelated spawn (got: $out)"
+  assert_contains "$out" "NOT well-formed closures" "malformed register line warned about nothing"
+  assert_contains "$out" "- oops-this-entry-has-no-second-colon" "warning did not name the offending line"
+  assert_contains "$out" "- <slug>: <comma-separated keywords>:" "warning did not state the expected format"
+  assert_not_contains "$out" "a comment must stay silent" "a comment line was reported as malformed"
+  assert_not_contains "$out" "this prose line must stay silent" "a prose line was reported as malformed"
+  assert_not_contains "$out" "- good-topic:" "a well-formed entry was reported as malformed"
+
+  # Positive control for the silence assertions: a register whose only entries are
+  # well-formed must produce NO warning at all, so the assertions above are reading
+  # a warning that genuinely fires rather than one that never fires.
+  printf -- '- good-topic: deleted user backlog: closed by the captain (closed 2026-07-25)\n' \
+    > "$home/data/closed.md"
+  write_brief "$home" malformed-o2 'Add a settings screen for notification preferences.'
+  out=$(run_spawnable "$home" "$wt" malformed-o2 projects/alpha codex --why captain)
+  status=$?
+  expect_code 0 "$status" "a clean register blocked an unrelated spawn (got: $out)"
+  assert_not_contains "$out" "NOT well-formed closures" "a clean register still warned"
+  pass "gate 2: a malformed register line is warned about by name, while comments and prose stay silent"
 }
 
 # An absent register is inert: no closure, no error, no behavior change.
@@ -518,6 +631,7 @@ SH
       present) printf '%s\n' "$REGISTER" > "$home/data/closed.md" ;;
       empty) : > "$home/data/closed.md" ;;
       noise) printf '# just a note\n\nnot an entry\n' > "$home/data/closed.md" ;;
+      malformed) printf -- '- oops-no-second-colon\n' > "$home/data/closed.md" ;;
       absent) : ;;
     esac
     out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" TMUX='' "$BOOTSTRAP")
@@ -531,21 +645,68 @@ register with entries is reported|present|CLOSED_TOPICS: 2 closed at intake: sub
 absent register stays silent|absent|-
 empty register stays silent|empty|-
 comment-only register stays silent|noise|-
+a malformed line is named, not counted away|malformed|CLOSED_TOPICS_MALFORMED: closes nothing, fix or remove: - oops-no-second-colon
 ROWS
-  pass "bootstrap reports closed topics only when the register holds entries"
+  pass "bootstrap reports closed topics only when the register holds entries, and names malformed lines"
+}
+
+# The malformed report must not be inferable only from a slug count nobody reads:
+# the register that carries a malformed line alongside real entries must print BOTH
+# the offending line and the normal count line, and a clean register must print
+# neither warning.
+test_bootstrap_malformed_report_is_specific() {
+  local home fakebin out
+  home="$TMP_ROOT/bootstrap-malformed"
+  mkdir -p "$home/data"
+  fakebin=$(fm_fakebin "$TMP_ROOT/bootstrap-malformed")
+  fm_fake_exit0 "$fakebin" tmux node gh gh-axi chrome-devtools-axi lavish-axi curl jq
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = get ] && [ "${2:-}" = --help ] && printf '%s\n' 'Usage: treehouse get [--lease]'
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
+  cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = --version ] && printf '%s\n' 'no-mistakes version v1.31.2 (fake)'
+exit 0
+SH
+  chmod +x "$fakebin/no-mistakes"
+
+  printf '%s\n' "$REGISTER" > "$home/data/closed.md"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" TMUX='' "$BOOTSTRAP")
+  assert_contains "$out" "CLOSED_TOPICS_MALFORMED: closes nothing, fix or remove: - malformed-entry-with-no-second-colon" \
+    "bootstrap did not name the malformed line alongside real entries"
+  assert_contains "$out" "CLOSED_TOPICS: 2 closed at intake:" \
+    "bootstrap dropped the normal count line when a malformed line was present"
+  assert_not_contains "$out" "CLOSED_TOPICS_MALFORMED: closes nothing, fix or remove: this prose line" \
+    "bootstrap reported a prose line as malformed"
+
+  # Positive control for that absence: a clean register reports the count and no
+  # malformed line at all.
+  printf -- '- good-topic: deleted user backlog: closed by the captain (closed 2026-07-25)\n' \
+    > "$home/data/closed.md"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" TMUX='' "$BOOTSTRAP")
+  assert_contains "$out" "CLOSED_TOPICS: 1 closed at intake: good-topic" "clean register lost its count line"
+  assert_not_contains "$out" "CLOSED_TOPICS_MALFORMED" "a clean register still reported a malformed line"
+  pass "bootstrap names a malformed closure line without dropping the normal report"
 }
 
 test_why_gate
 test_why_refusal_text
 test_why_gate_exempts_secondmate
 test_why_gate_batch
+test_reopen_closed_refused_in_batch
 test_closed_gate_refuses
 test_closed_refusal_shows_the_line
 test_closed_matching_precision
 test_closed_ignores_non_entries
+test_closed_ignores_injected_boilerplate
+test_closed_malformed_line_is_loud
 test_closed_absent_register
 test_meta_records_provenance
 test_brief_freshness_section
 test_brief_access_section
 test_brief_access_map_injection
 test_bootstrap_closed_report
+test_bootstrap_malformed_report_is_specific

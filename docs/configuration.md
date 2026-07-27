@@ -22,6 +22,32 @@ It intentionally mirrors the behavior-test baseline in [`.github/workflows/ci.ym
 
 Personal preferences for one captain's fleet live locally in `data/captain.md`; it is gitignored and read after `data/projects.md` and optional `data/secondmates.md` during bootstrap.
 
+## Closed topics (data/closed.md)
+
+Topics the captain has closed live locally in `data/closed.md`; it is gitignored, because closures are captain-specific while the gate that enforces them is shared.
+`bin/fm-spawn.sh` matches every ship and scout spawn against it and refuses with exit 3 before any window or meta exists, printing the matching closure line verbatim; bootstrap reports the closed slugs once per session as `CLOSED_TOPICS:`.
+One entry per line:
+
+```markdown
+- <slug>: <comma-separated keywords>: <one-line why> (closed <date>)
+```
+
+Blank lines, `#` comments, and prose that does not start with `- ` are ignored.
+A line that starts with `- ` but is not a well-formed entry (no second `:`, or an empty slug) closes nothing, and is reported rather than silently skipped: `bin/fm-spawn.sh` warns to stderr without blocking the spawn, and bootstrap prints one `CLOSED_TOPICS_MALFORMED:` line naming the offending line.
+A silent skip would leave the captain believing a topic is closed while the gate had quietly stopped covering it.
+
+Matching normalizes case and punctuation and requires whole-token phrase hits, so `post-deletion`, `Post Deletion`, and a phrase wrapped across a line break all match, while `billings` does not match `billing`.
+Breadth is the operator's lever: a one-word generic keyword blocks unrelated work that merely mentions it, so entries should carry specific multi-word phrases.
+Only the task id and the brief's `# Task` section are matched, never the boilerplate `bin/fm-brief.sh` injects into every brief, so a keyword that happens to appear in the conventions, freshness, access, or fleet-map blocks cannot refuse the whole fleet's dispatch.
+`--reopen-closed` is the one authorised bypass; it records `reopened_closed=<slug>` in the task's meta and is refused in batch dispatch, so one captain-authorised reopen never widens into a blanket bypass for every pair.
+
+## Fleet access map (data/access.md)
+
+What access this fleet has, where it lives, and how a crew reaches it lives locally in `data/access.md`; it is gitignored, because the inventory is captain-specific while the routing rule is shared.
+`bin/fm-brief.sh` appends it to every ship and scout brief under the `## Fleet access map` heading, so crews get a current inventory instead of one asserted in a tracked file.
+There is no required format; keep it a short list per capability and mark firstmate-only capabilities explicitly, since crew reach varies by harness and pane.
+The file is optional: when it is absent the structural probe-then-escalate section still ships, because the half that always applies is the routing rule rather than the inventory.
+
 ## Secondmate routes (data/secondmates.md)
 
 Persistent secondmate routes live locally in `data/secondmates.md`.

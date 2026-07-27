@@ -10,11 +10,16 @@
 #   task's meta. "Interesting", "worth doing", "found while looking at X" and "tidy-up"
 #   are not reasons to start work, and there is no tag for them. --secondmate is exempt:
 #   launching a persistent supervisor is lifecycle, not work.
-#   INTAKE GATE 2 - closed topics refuse at intake. The task id and the brief text are
-#   matched against data/closed.md (see bin/fm-closed-lib.sh for the register format and
-#   the exact matching rule); a match REFUSES and prints the closure line verbatim.
+#   INTAKE GATE 2 - closed topics refuse at intake. The task id and the brief's "# Task"
+#   section - never the boilerplate fm-brief.sh injects into every brief - are matched
+#   against data/closed.md (see bin/fm-closed-lib.sh for the register format and the exact
+#   matching rule); a match REFUSES and prints the closure line verbatim. A register line
+#   that starts with "- " but is not a well-formed entry closes nothing, and is warned
+#   about on stderr rather than skipped silently.
 #   --reopen-closed proceeds anyway, records reopened_closed=<slug> in meta, and prints a
-#   loud warning; it exists so the captain can authorise a reopen deliberately.
+#   loud warning; it exists so the captain can authorise a reopen deliberately. It is a
+#   per-task authorisation, so batch dispatch REFUSES it (exit 2) rather than widening one
+#   reopen into a blanket bypass for every pair.
 #   With no harness arg, the harness comes from fm-harness.sh crew (config/crew-harness,
 #   falling back to firstmate's own harness). A bare adapter name (claude|codex|
 #   opencode|pi) overrides it for this spawn. A non-flag string containing whitespace
@@ -158,6 +163,20 @@ fi
 idpart=${POS[0]:-}
 idpart=${idpart%%=*}
 if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in */*) false ;; *) true ;; esac; then
+  # --reopen-closed is the ONE designed bypass of the closed-topic gate, and it is a
+  # per-task authorisation the captain gave for one topic. A shared batch flag would
+  # widen that single authorisation into a blanket bypass for every pair, each
+  # recording reopened_closed= for whatever it happened to match. The escape hatch
+  # stays exactly as narrow as the single-task path: spawn the authorised task alone.
+  if [ -n "$REOPEN_CLOSED" ]; then
+    {
+      echo "error: --reopen-closed is not accepted in batch dispatch."
+      echo "Reopening a closed topic is a per-task authorisation from the captain; a shared flag"
+      echo "would bypass the closed-topic gate for every pair in the batch. Spawn the authorised"
+      echo "task on its own with --reopen-closed, and batch the rest."
+    } >&2
+    exit 2
+  fi
   rc=0
   for pair in "${POS[@]}"; do
     case "$pair" in
@@ -169,12 +188,11 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
       rc=2
       continue
     fi
-    # The shared --why (already validated above) and --reopen-closed are forwarded to
-    # every pair, so each task's meta records its own why= and the closed-topic gate
-    # sees the same authorisation the batch was given.
+    # The shared --why (already validated above) is forwarded to every pair, so each
+    # task's meta records its own why=. --reopen-closed is refused above rather than
+    # forwarded, so every pair meets the closed-topic gate on its own terms.
     batch_flags=(--why "$WHY_RECORD")
     if [ "$KIND" = scout ]; then batch_flags+=(--scout); fi
-    if [ -n "$REOPEN_CLOSED" ]; then batch_flags+=(--reopen-closed); fi
     if FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "${pair%%=*}" "${pair#*=}" "${batch_flags[@]}"; then :; else echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2; rc=1; fi
   done
   exit "$rc"
@@ -445,10 +463,30 @@ fi
 # the attention has already been spent. Matched against the task id AND the brief text
 # (see bin/fm-closed-lib.sh for the register format and matching rule). Secondmate
 # launches are exempt - they carry a charter, not a task.
+#
+# The brief contributes only its "# Task" section, never the boilerplate fm-brief.sh
+# injects into every brief (conventions, freshness, access rules, the fleet access
+# map). Matching the whole file would let one unlucky keyword refuse every dispatch
+# in the fleet; a gate that fails closed on everything is worse than the failure it
+# was built to stop. A hand-written brief has no "# Task" heading and falls back to
+# its whole text, which carries no injected boilerplate.
 REOPENED_CLOSED=
 if [ "$KIND" != secondmate ] && [ -f "$CLOSED" ]; then
+  # A "- " line that is not a well-formed entry gates nothing, so say so out loud
+  # rather than skipping it: a typo'd closure that fails silently leaves the captain
+  # believing a topic is closed when the gate has quietly stopped covering it. It is
+  # a warning, not a refusal - an unrelated task must not be blocked by someone
+  # else's typo.
+  closed_bad=$(fm_closed_malformed "$CLOSED")
+  if [ -n "$closed_bad" ]; then
+    {
+      echo "warning: $CLOSED has line(s) that are NOT well-formed closures, so they close NOTHING:"
+      printf '%s\n' "$closed_bad" | sed 's/^/  /'
+      echo "expected format: - <slug>: <comma-separated keywords>: <one-line why> (closed <date>)"
+    } >&2
+  fi
   closed_hay=$(mktemp "${TMPDIR:-/tmp}/fm-closed.XXXXXX")
-  { printf '%s\n' "$ID"; cat "$BRIEF"; } > "$closed_hay"
+  { printf '%s\n' "$ID"; fm_closed_task_section "$BRIEF"; } > "$closed_hay"
   closed_hits=$(fm_closed_match "$CLOSED" "$closed_hay" || true)
   rm -f "$closed_hay"
   if [ -n "$closed_hits" ]; then
