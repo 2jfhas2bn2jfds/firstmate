@@ -36,6 +36,7 @@ One entry per line:
 ```
 
 Blank lines, `#` comments, and prose that does not start a bullet are ignored.
+A bullet is a `-` followed by any whitespace, tab included, because that is what markdown renders as a list item and therefore what reads as a closure; every bullet either closes something or is reported, with no silent third category.
 A bullet that is not a well-formed entry closes nothing, and is reported rather than silently skipped: `bin/fm-spawn.sh` warns to stderr without blocking the spawn, and bootstrap prints one `CLOSED_TOPICS_MALFORMED:` line naming the offending line.
 An entry is well-formed only when it can actually fire: both `:` separators, a non-empty slug, a keyword list holding at least one keyword that survives normalization (`- topic:: why` and `- topic: ---: why` do not), and a bullet starting at column one (an indented bullet is never matched).
 An entry with no usable keyword is therefore reported as malformed and left out of the `CLOSED_TOPICS:` count, rather than counted as a closure the gate can never fire on.
@@ -50,8 +51,9 @@ Everything else stays matched, including a task body's own `# ` headings, fenced
 Every uncertain case keeps the whole region or the whole brief rather than dropping any of it: a brief with no markers at all (hand-written, or generated before markers existed) is matched whole with no heading-text fallback, a brief whose markers do not balance is matched whole and reported on stderr, and a marked region that does not open with a generated section is kept and reported on stderr.
 Narrowing therefore fails toward a loud false refusal, undone with one flag, rather than toward a closure silently covering less than the captain believes.
 Set `FM_CLOSED_EXPLAIN=1` on a spawn to print the exact haystack the gate matched, how many marked regions were stripped, and how many were kept because they were not recognisable.
-A ship or scout spawn whose brief still carries the scaffold's unreplaced `{TASK}` placeholder on a line of its own, outside any fenced code block, refuses with exit 4 before this gate runs, because an unfilled brief would leave the closure check with nothing to match.
-A brief whose task body mentions the placeholder in prose, or demonstrates the scaffold's shape inside a fence, is unaffected: the task body is free text, and a brief about the brief scaffold legitimately does both.
+A ship or scout spawn whose brief still carries the scaffold's unreplaced `{TASK}` placeholder on a line of its own refuses with exit 4 before this gate runs, because an unfilled brief would leave the closure check with nothing to match.
+The scan starts at the brief's own `# Task` heading with fence state reset there, so in a generated brief, which always carries that heading, a task body that mentions the placeholder in prose or demonstrates the scaffold's shape inside a fence is unaffected: the task body is free text, and a brief about the brief scaffold legitimately does both.
+A brief with no `# Task` heading at all gets no fence tracking, because nothing outside a known task section says where a fence opened, so any standalone placeholder in such a brief refuses regardless of fences; `--allow-unfilled-task` is the way through.
 `--allow-unfilled-task` waives that check, warns loudly, and records `allowed_unfilled_task=1` in the task's meta; like `--reopen-closed` it is a per-task waiver, so batch dispatch refuses it.
 `--reopen-closed` is the one authorised bypass; it records `reopened_closed=<slug>` in the task's meta and is refused in batch dispatch, so one captain-authorised reopen never widens into a blanket bypass for every pair.
 

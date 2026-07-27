@@ -35,9 +35,12 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 REG="$DATA/secondmates.md"
-SUB_HOME_MARKER=".fm-secondmate-home"
 # shellcheck source=bin/fm-fleet-home-lib.sh
 . "$SCRIPT_DIR/fm-fleet-home-lib.sh"
+# One definition of the secondmate marker: the fleet-register redirection keys on
+# this name, so a second copy here could rename out of step and split "is this a
+# secondmate home?" between call sites with no symptom.
+SUB_HOME_MARKER="$FM_SECONDMATE_HOME_MARKER"
 
 usage() {
   echo "usage: fm-home-seed.sh <id> <home|-> <project>..." >&2

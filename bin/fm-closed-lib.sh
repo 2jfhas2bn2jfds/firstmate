@@ -19,9 +19,11 @@
 #   - <slug>: <comma-separated keywords>: <one-line why> (closed <date>)
 #
 # Blank lines and lines whose first non-space character is '#' are comments.
-# A line that does not start with "- " is ignored, so a hand-written note in the
-# file never becomes a silent gate. A line that DOES start with "- " but is not a
-# well-formed entry gates nothing either, and that is exactly why
+# A line that does not start a bullet is ignored, so a hand-written note in the
+# file never becomes a silent gate. A bullet is a '-' followed by any whitespace,
+# tab included, because that is what markdown renders as a list item and therefore
+# what the captain sees as a closure. A line that IS a bullet but is not a
+# well-formed entry gates nothing, and that is exactly why
 # fm_closed_malformed reports it: a typo'd closure would otherwise disarm the gate
 # while the captain believes the topic is closed, which is a control going quiet at
 # the moment it has failed.
@@ -61,14 +63,30 @@ fm_closed_normalize() {
   LC_ALL=C tr '[:upper:]' '[:lower:]' | LC_ALL=C tr -c 'a-z0-9' ' ' | LC_ALL=C tr -s ' '
 }
 
+# fm_closed_bullet_body <line>: print what follows a leading "-" plus ONE whitespace
+# character, and return 1 when the line is not a bullet at all.
+#
+# The whitespace is any whitespace, not just a space, because CommonMark and GitHub
+# both render "-<TAB>foo" as a list item: the captain sees a bullet indistinguishable
+# from every other closure. This is the ONE definition of "attempted bullet", shared
+# by the parser and by fm_closed_malformed, so the two can never disagree about a
+# line - a shape that is a bullet to one and prose to the other would be neither
+# honoured as a closure nor reported as broken, which is a closure evaporating in
+# silence. Every bullet either closes something or is named out loud; there is no
+# third category.
+fm_closed_bullet_body() {
+  local line=$1 body
+  case "$line" in
+    '-'[[:space:]]*) body=${line#-}; printf '%s\n' "${body#?}" ;;
+    *) return 1 ;;
+  esac
+}
+
 # fm_closed_entry_field <line> <slug|keywords|why>: parse one register line.
 # Returns 1 for any line that is not a well-formed entry (comment, blank, prose).
 fm_closed_entry_field() {
   local line=$1 field=$2 body rest
-  case "$line" in
-    '- '*) body=${line#- } ;;
-    *) return 1 ;;
-  esac
+  body=$(fm_closed_bullet_body "$line") || return 1
   case "$body" in
     *:*:*) : ;;
     *) return 1 ;;
@@ -110,20 +128,17 @@ fm_closed_slugs() {
 }
 
 # fm_closed_malformed <register>: print every attempted-bullet line that is NOT a
-# well-formed entry, one per line, verbatim. An attempted bullet is any line whose
-# first non-space characters are "- ", so an indented bullet is reported too: it
-# looks like a closure and closes nothing. Comments, blank lines, and prose that
-# does not start a bullet stay silent, because those are notes rather than attempted
-# closures. Silent (and exit 0) when the register is absent.
+# well-formed entry, one per line, verbatim. An attempted bullet is whatever
+# fm_closed_bullet_body accepts once leading indentation is stripped, so an indented
+# bullet is reported too: it looks like a closure and closes nothing. Comments, blank
+# lines, and prose that does not start a bullet stay silent, because those are notes
+# rather than attempted closures. Silent (and exit 0) when the register is absent.
 fm_closed_malformed() {
   local register=$1 line trimmed
   [ -f "$register" ] || return 0
   while IFS= read -r line || [ -n "$line" ]; do
     trimmed=$(printf '%s' "$line" | sed 's/^[[:space:]]*//')
-    case "$trimmed" in
-      '- '*) : ;;
-      *) continue ;;
-    esac
+    fm_closed_bullet_body "$trimmed" >/dev/null || continue
     fm_closed_entry_valid "$line" && continue
     printf '%s\n' "$line"
   done < "$register"

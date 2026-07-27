@@ -75,3 +75,19 @@ jobs:
             echo "Remove them, or add them to the allowlist in this job if they belong here."
             exit 1
           fi
+      # The allowlist above guards a LOCATION, but the accident it was written for is
+      # location-independent: a mis-quoted command turns its own text into a filename
+      # wherever the shell happened to be, so the same slip inside bin/ or tests/ would
+      # pass every job. This guards the MECHANISM anywhere in the tree. Every path this
+      # repo has ever tracked is plain kebab or snake case, so the safe set is tight on
+      # purpose; a deliberate new path outside it is a one-line change here.
+      - name: Tracked paths must carry only shell-safe characters
+        run: |
+          set -eu
+          hostile=$(git ls-files | grep -E '[^A-Za-z0-9._/-]' || true)
+          if [ -n "$hostile" ]; then
+            echo "::error::Tracked paths carry characters outside [A-Za-z0-9._/-]:"
+            printf '%s\n' "$hostile"
+            echo "These are usually shell mis-quote artifacts. Remove them, or widen the pattern in this job if the name is deliberate."
+            exit 1
+          fi

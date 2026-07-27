@@ -688,6 +688,48 @@ EOF
   pass "gate 2: an entry with no usable keyword is malformed and loud, never a silent closure"
 }
 
+# CommonMark and GitHub both render "-<TAB>foo" as a list item, so a closure written
+# with a tab after the dash looks exactly like every other one to the captain. If the
+# parser and the malformed detector disagree about whether that is a bullet, the line
+# is neither honoured nor reported: a closure evaporating in silence, the one shape
+# this register exists to make impossible. So a tabbed bullet is a bullet in BOTH
+# directions - it closes when it is well formed, and it is named when it is not.
+test_closed_tab_bullet_entries() {
+  local home wt out status
+  read -r home wt <<EOF
+$(spawnable_home closed-tab-bullet)
+EOF
+  # printf builds the tabs, so the fixture cannot be silently detabbed by an editor.
+  printf -- '-\ttab-topic: deleted user backlog: the captain closed this (closed 2026-07-25)\n-\ttab-broken-topic:: also meant to be closed (closed 2026-07-27)\n- space-topic: subscription cancellation: handled out of band (closed 2026-07-27)\n' \
+    > "$home/data/closed.md"
+
+  # A well-formed tabbed entry closes its topic like any other.
+  write_brief "$home" tabb-p1 'Work the deleted user backlog until it drains.'
+  out=$(run_spawnable "$home" "$wt" tabb-p1 projects/alpha codex --why captain)
+  status=$?
+  expect_code 3 "$status" "a well-formed tabbed entry did not refuse a matching spawn (got: $out)"
+  assert_contains "$out" "tab-topic: deleted user backlog:" "the tabbed closure line was not printed verbatim"
+  assert_absent "$home/state/tabb-p1.meta" "a refused spawn still wrote meta"
+
+  # A malformed tabbed entry is named rather than skipped, and does not block work.
+  write_brief "$home" tabb-p2 'Add a settings screen for notification preferences.'
+  out=$(run_spawnable "$home" "$wt" tabb-p2 projects/alpha codex --why captain)
+  status=$?
+  expect_code 0 "$status" "a malformed tabbed entry blocked an unrelated spawn (got: $out)"
+  assert_contains "$out" "NOT well-formed closures" "a malformed tabbed entry warned about nothing"
+  assert_contains "$out" "tab-broken-topic::" "the warning did not name the malformed tabbed line"
+  assert_not_contains "$out" "tab-topic: deleted user backlog" "a usable tabbed entry was reported as malformed"
+
+  # Positive control on the SAME register: the ordinary space bullet still refuses,
+  # so the assertions above cannot pass by register parsing having broken entirely.
+  write_brief "$home" tabb-p3 'Re-check the subscription cancellation path.'
+  out=$(run_spawnable "$home" "$wt" tabb-p3 projects/alpha codex --why captain)
+  status=$?
+  expect_code 3 "$status" "positive control: the space-bullet entry did not refuse"
+  assert_contains "$out" "- space-topic: subscription cancellation:" "the closure line was not printed verbatim"
+  pass "gate 2: a tabbed bullet closes when well formed and is named when it is not"
+}
+
 # Markers alone are not enough to drop text, because a task in THIS repo legitimately
 # quotes the marker pair when it is about the brief scaffold. So a region is dropped
 # only when the marker and the text AGREE: marked AND opening with a section
@@ -1594,6 +1636,7 @@ test_closed_marker_fallbacks_keep_whole_brief
 test_closed_explain_shows_the_haystack
 test_closed_malformed_line_is_loud
 test_closed_empty_keyword_entry_is_malformed
+test_closed_tab_bullet_entries
 test_closed_quoted_markers_in_task_body_still_match
 test_unfilled_brief_refuses
 test_placeholder_mention_in_task_body_spawns

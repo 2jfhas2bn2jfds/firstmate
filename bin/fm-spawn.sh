@@ -12,13 +12,15 @@
 #   are not reasons to start work, and there is no tag for them. --secondmate is exempt:
 #   launching a persistent supervisor is lifecycle, not work.
 #   INTAKE GATE 2a - a ship or scout spawn also REFUSES (exit 4) when its brief still
-#   carries the scaffold's unreplaced {TASK} placeholder on a line of its own, OUTSIDE any
-#   fenced code block: the brief was never filled in, and an empty task body would leave
-#   gate 2 below with nothing to match. A brief that mentions the placeholder in prose, or
-#   demonstrates the scaffold's shape inside a fence, is unaffected. The scan starts at the
-#   brief's own "# Task" heading with fence state reset, so a fence left hanging open in the
-#   injected conventions above it cannot hide the placeholder; where the fence state is
-#   ambiguous the brief is treated as UNFILLED, the loud direction, since this check has a
+#   carries the scaffold's unreplaced {TASK} placeholder on a line of its own: the brief was
+#   never filled in, and an empty task body would leave gate 2 below with nothing to match.
+#   The scan starts at the brief's own "# Task" heading with fence state reset, so a fence
+#   left hanging open in the injected conventions above it cannot hide the placeholder, and
+#   a generated brief (which always carries that heading) is unaffected by a task body that
+#   mentions the placeholder in prose or demonstrates the scaffold's shape inside a fence.
+#   A brief with NO task heading gets no fence tracking at all, so any standalone
+#   placeholder in it refuses regardless of fences; where the fence state is ambiguous the
+#   brief is likewise treated as UNFILLED, the loud direction, since this check has a
 #   waiver and a missed unfilled brief also empties gate 2.
 #   --allow-unfilled-task proceeds anyway, records allowed_unfilled_task=1 in meta, and
 #   prints a loud warning; like --reopen-closed it is a per-task waiver, so batch dispatch
@@ -90,15 +92,19 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
-SUB_HOME_MARKER=".fm-secondmate-home"
+# shellcheck source=bin/fm-fleet-home-lib.sh
+. "$SCRIPT_DIR/fm-fleet-home-lib.sh"
+# One definition of the secondmate marker, sourced above and taken here before the
+# libraries that read it: the whole fleet-register redirection keys on this name, so
+# a rename that missed a copy would split "is this a secondmate home?" between call
+# sites with no symptom.
+SUB_HOME_MARKER="$FM_SECONDMATE_HOME_MARKER"
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 # shellcheck source=bin/fm-git-author-lib.sh
 . "$SCRIPT_DIR/fm-git-author-lib.sh"
 # shellcheck source=bin/fm-closed-lib.sh
 . "$SCRIPT_DIR/fm-closed-lib.sh"
-# shellcheck source=bin/fm-fleet-home-lib.sh
-. "$SCRIPT_DIR/fm-fleet-home-lib.sh"
 # The closed-topic register is fleet-wide and lives in the MAIN firstmate home.
 # Most crews here are dispatched by secondmates, so a per-home register would have
 # left gate 2 enforced where work is not started and inert everywhere it is; a
@@ -532,7 +538,8 @@ fi
 # (fm-brief.sh reports a charter that still carries the placeholder).
 #
 # Matched ONLY where the scaffold leaves it: a line whose entire content is the
-# placeholder, OUTSIDE any fenced code block. A task body is free text, and in this
+# placeholder, and - in a brief that carries a task heading, which every generated
+# brief does - OUTSIDE any fenced code block. A task body is free text, and in this
 # repo a brief about the brief scaffold legitimately writes "replace the {TASK}
 # placeholder" in prose and demonstrates the scaffold's shape in a fence:
 #
