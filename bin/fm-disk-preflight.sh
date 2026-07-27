@@ -96,7 +96,7 @@ for meta in "$FM_HOME"/state/*.meta; do
   [ -e "$meta" ] || continue
   id="$(basename "$meta" .meta)"
   wt="$(grep -o '^worktree=[^ ]*' "$meta" | cut -d= -f2)"
-  [ -n "$wt" ] && [ -d "$wt" ] || continue
+  if [ -z "$wt" ] || [ ! -d "$wt" ]; then continue; fi
 
   # (c) secondmate homes are persistent - never auto-teardown them here
   grep -qx 'kind=secondmate' "$meta" && continue

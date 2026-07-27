@@ -24,7 +24,7 @@ BRIEF_SH="$ROOT/bin/fm-brief.sh"
 BOOTSTRAP="$ROOT/bin/fm-bootstrap.sh"
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 TMP_ROOT=$(fm_test_tmproot fm-intake-gates)
-fm_git_identity
+fm_git_identity fmtest fmtest@example.invalid
 
 # --- harness ----------------------------------------------------------------
 
