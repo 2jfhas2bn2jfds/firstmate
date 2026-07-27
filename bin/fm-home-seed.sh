@@ -11,8 +11,11 @@
 #       from the active home into the secondmate home's projects/ directory.
 #       That project list is non-exclusive provisioning data. The charter brief
 #       is copied to data/charter.md, newly cloned no-mistakes projects are
-#       initialized, a .fm-secondmate-home marker is written, and
-#       data/secondmates.md is updated.
+#       initialized, a .fm-secondmate-home marker is written, config/primary-home
+#       records the main firstmate home whose fleet-wide data/closed.md and
+#       data/access.md this home must read (a pointer, never a copy, so a closure
+#       cannot silently expire in a stale duplicate - see bin/fm-fleet-home-lib.sh),
+#       and data/secondmates.md is updated.
 #       Seeding is transactional: on validation, clone, init, or registry failure,
 #       generated briefs, new homes, new project clones, and registry edits are
 #       rolled back. Treehouse-acquired homes are returned only when the rollback
@@ -33,6 +36,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 REG="$DATA/secondmates.md"
 SUB_HOME_MARKER=".fm-secondmate-home"
+# shellcheck source=bin/fm-fleet-home-lib.sh
+. "$SCRIPT_DIR/fm-fleet-home-lib.sh"
 
 usage() {
   echo "usage: fm-home-seed.sh <id> <home|-> <project>..." >&2
@@ -378,7 +383,7 @@ validate_operational_dirs() {
 validate_seed_leaf_files() {
   local home=$1 label path abs_home abs_path
   abs_home=$(resolved_path "$home")
-  for label in "data/projects.md" "data/charter.md" "$SUB_HOME_MARKER"; do
+  for label in "data/projects.md" "data/charter.md" "$FM_PRIMARY_HOME_POINTER" "$SUB_HOME_MARKER"; do
     path="$home/$label"
     if [ -L "$path" ]; then
       echo "error: secondmate leaf file must not be a symlink: $path" >&2
@@ -706,6 +711,7 @@ seed_rollback() {
       fi
       if [ -n "${SEED_BACKUP_DIR:-}" ] && [ "${SEED_HOME_BACKED_UP:-0}" = 1 ]; then
         restore_seed_file "$SEED_MARKER_EXISTED" "$SEED_BACKUP_DIR/marker" "$SEED_HOME/$SUB_HOME_MARKER"
+        restore_seed_file "$SEED_PRIMARY_PTR_EXISTED" "$SEED_BACKUP_DIR/primary-home" "$SEED_HOME/$FM_PRIMARY_HOME_POINTER"
         restore_seed_file "$SEED_CHARTER_EXISTED" "$SEED_BACKUP_DIR/charter.md" "$SEED_HOME/data/charter.md"
         restore_seed_file "$SEED_SUB_REG_EXISTED" "$SEED_BACKUP_DIR/sub-projects.md" "$SEED_HOME/data/projects.md"
       fi
@@ -801,7 +807,7 @@ write_registry() {
 }
 
 seed_home() {
-  local id=$1 requested_home=$2 requested_abs home projects_csv project project_dst charter_summary charter_scope
+  local id=$1 requested_home=$2 requested_abs home projects_csv project project_dst charter_summary charter_scope seed_primary_home seed_ptr_err
   shift 2
   [ $# -gt 0 ] || { echo "error: secondmate needs at least one project" >&2; return 1; }
 
@@ -828,6 +834,7 @@ seed_home() {
   SEED_SUB_REG_EXISTED=0
   SEED_CHARTER_EXISTED=0
   SEED_MARKER_EXISTED=0
+  SEED_PRIMARY_PTR_EXISTED=0
   trap seed_rollback EXIT
   if [ -f "$REG" ]; then
     SEED_PARENT_REG_EXISTED=1
@@ -864,6 +871,10 @@ seed_home() {
   if [ -f "$home/$SUB_HOME_MARKER" ]; then
     SEED_MARKER_EXISTED=1
     cp "$home/$SUB_HOME_MARKER" "$SEED_BACKUP_DIR/marker"
+  fi
+  if [ -f "$home/$FM_PRIMARY_HOME_POINTER" ]; then
+    SEED_PRIMARY_PTR_EXISTED=1
+    cp "$home/$FM_PRIMARY_HOME_POINTER" "$SEED_BACKUP_DIR/primary-home"
   fi
   SEED_HOME_BACKED_UP=1
 
@@ -910,6 +921,19 @@ seed_home() {
 
   projects_csv=$(join_projects "$@")
   printf '%s\n' "$id" > "$home/$SUB_HOME_MARKER"
+  # Point the new home at the ONE main firstmate home whose data/closed.md and
+  # data/access.md it must read, so the closed-topic gate and the fleet access map
+  # cover the work this secondmate dispatches. A pointer rather than a copy: a copy
+  # drifts, and a stale copy is a closure that silently expires. Resolved
+  # transitively, so a secondmate seeding another one hands down the same main home.
+  if ! seed_primary_home=$(fm_primary_home "$FM_HOME"); then
+    echo "error: cannot resolve the main firstmate home to record in $home/$FM_PRIMARY_HOME_POINTER: $seed_primary_home" >&2
+    return 1
+  fi
+  if ! seed_ptr_err=$(fm_write_primary_home_pointer "$home" "$seed_primary_home"); then
+    echo "error: $seed_ptr_err" >&2
+    return 1
+  fi
   write_registry "$id" "$home" "$projects_csv" "$SEED_PARENT_BRIEF"
   validate_registry
   SEED_COMMITTED=1

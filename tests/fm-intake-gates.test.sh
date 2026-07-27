@@ -796,6 +796,186 @@ EOF
   pass "spawn: a brief still carrying the {TASK} placeholder refuses with its own exit code"
 }
 
+# The placeholder refusal has NO override - no --reopen-closed equivalent, nothing -
+# so an over-broad match is unrecoverable except by rewording the task. A task body is
+# free text, and in this repo a brief about the brief scaffold legitimately writes the
+# placeholder in prose or quotes it in a fenced block; only the scaffold's own
+# standalone placeholder line means "never filled in".
+test_placeholder_mention_in_task_body_spawns() {
+  local home wt out status
+  read -r home wt <<EOF
+$(spawnable_home placeholder-mention)
+EOF
+  write_brief "$home" mention-p1 '# Task\nRewrite the brief scaffold so firstmate must replace the {TASK} placeholder before spawning.\n\n```sh\n# regenerate, then fill it in\nsed -i "" "s/{TASK}/the real task/" data/x/brief.md\n```\n'
+  out=$(run_spawnable "$home" "$wt" mention-p1 projects/alpha codex --why captain)
+  status=$?
+  expect_code 0 "$status" "a brief that merely mentions the placeholder was refused (got: $out)"
+  assert_not_contains "$out" "never filled in" "an inline placeholder mention was read as an unfilled brief"
+  assert_present "$home/state/mention-p1.meta" "a legitimate placeholder-mentioning brief did not spawn"
+
+  # Positive control on the same fixture: the scaffold's own standalone placeholder
+  # line, with the same surrounding prose, still refuses. Without this the negative
+  # above would also pass if the check had simply stopped working.
+  write_brief "$home" mention-p2 'Rewrite the brief scaffold so firstmate must replace the placeholder.\n\n# Task\n{TASK}\n'
+  out=$(run_spawnable "$home" "$wt" mention-p2 projects/alpha codex --why captain)
+  status=$?
+  expect_code 4 "$status" "control: a standalone {TASK} line spawned anyway (got: $out)"
+  assert_contains "$out" "the brief was never filled in" "control: the refusal text changed"
+  assert_contains "$out" "filling in the brief's task section" "the refusal does not say how to fix it"
+  assert_absent "$home/state/mention-p2.meta" "control: a refused spawn still wrote meta"
+  pass "spawn: only the scaffold's own standalone {TASK} line counts as an unfilled brief"
+}
+
+# --- gate 2 across homes: the register is fleet-wide ------------------------
+
+# secondmate_fixture <name>: a MAIN firstmate home plus a REAL secondmate home
+# seeded from it by bin/fm-home-seed.sh, with an isolated worktree of the
+# secondmate's own clone so a spawn dispatched from inside that home can complete.
+# Echoes "<main-home> <secondmate-home> <worktree>".
+secondmate_fixture() {
+  local name=$1 main sub wt
+  main="$TMP_ROOT/$name-main"
+  sub="$TMP_ROOT/$name-sub"
+  wt="$TMP_ROOT/$name-wt"
+  mkdir -p "$main/data" "$main/state" "$main/projects"
+  fm_git_init_commit "$main/projects/alpha"
+  fm_git_add_origin "$main/projects/alpha" "$TMP_ROOT/remotes/$name-alpha.git"
+  printf -- '- alpha [direct-PR] - alpha project (added 2026-07-01)\n' > "$main/data/projects.md"
+  FM_HOME="$main" FM_SECONDMATE_CHARTER="triage for alpha" FM_SECONDMATE_SCOPE="triage for alpha" \
+    "$ROOT/bin/fm-home-seed.sh" "$name" "$sub" alpha >/dev/null 2>&1 \
+    || fail "$name: seeding a secondmate home failed"
+  git -C "$sub/projects/alpha" worktree add -q --detach "$wt" >/dev/null 2>&1 \
+    || fail "$name: could not create an isolated worktree in the secondmate clone"
+  printf '%s %s %s\n' "$main" "$sub" "$wt"
+}
+
+# Most crews in this fleet are dispatched BY SECONDMATES, so a register that only
+# existed in the main home would be enforced exactly where work is NOT started and
+# inert everywhere it is. Asserted from INSIDE a real seeded secondmate home, on a
+# closure the captain set only in the main home.
+test_closed_register_reaches_secondmate_homes() {
+  local main sub wt out status recorded
+  read -r main sub wt <<EOF
+$(secondmate_fixture reach)
+EOF
+  assert_present "$sub/config/primary-home" "seeding did not record the main firstmate home"
+  recorded=$(cat "$sub/config/primary-home")
+  [ "$(cd "$recorded" 2>/dev/null && pwd)" = "$(cd "$main" && pwd)" ] \
+    || fail "the recorded main firstmate home is wrong: $recorded"
+
+  printf -- '- deleted-user-backlog: deleted user backlog: closed by the captain (closed 2026-07-25)\n' \
+    > "$main/data/closed.md"
+  assert_absent "$sub/data/closed.md" "the secondmate home kept a competing register of its own"
+
+  write_brief "$sub" reach-s1 'Drain the deleted user backlog and report what is left.'
+  out=$(run_spawnable "$sub" "$wt" reach-s1 projects/alpha codex --why captain)
+  status=$?
+  expect_code 3 "$status" "a closed topic spawned from a secondmate home (got: $out)"
+  assert_contains "$out" "this topic is CLOSED." "the secondmate-home refusal lost its text"
+  assert_contains "$out" "- deleted-user-backlog: deleted user backlog: closed by the captain (closed 2026-07-25)" \
+    "the secondmate-home refusal did not print the closure line verbatim"
+  assert_absent "$sub/state/reach-s1.meta" "a refused secondmate-home spawn still wrote meta"
+
+  # Negative control on the SAME register: unrelated work from the same home still
+  # spawns, so the refusal above cannot be a matcher that refuses everything.
+  write_brief "$sub" reach-s2 'Add a settings screen for notification preferences.'
+  out=$(run_spawnable "$sub" "$wt" reach-s2 projects/alpha codex --why captain)
+  status=$?
+  expect_code 0 "$status" "control: unrelated work from a secondmate home was refused (got: $out)"
+  assert_present "$sub/state/reach-s2.meta" "control: unrelated work from a secondmate home did not spawn"
+  pass "gate 2: a closure set in the main home refuses work dispatched from a secondmate home"
+}
+
+# If the register cannot be found, does this get louder or quieter? A secondmate home
+# that cannot reach the main home has a BROKEN control, not an empty one, and the two
+# must never look the same. It warns and proceeds: failing closed on every dispatch
+# from that home would be its own outage.
+test_secondmate_unresolvable_register_is_loud() {
+  local main sub wt out status fakebin boot
+  read -r main sub wt <<EOF
+$(secondmate_fixture broken)
+EOF
+  printf -- '- deleted-user-backlog: deleted user backlog: closed by the captain (closed 2026-07-25)\n' \
+    > "$main/data/closed.md"
+  write_brief "$sub" broken-s1 'Add a settings screen for notification preferences.'
+
+  # Control first: with the pointer intact the spawn is silent about resolution.
+  out=$(run_spawnable "$sub" "$wt" broken-s1 projects/alpha codex --why captain)
+  status=$?
+  expect_code 0 "$status" "control: an intact pointer refused the spawn (got: $out)"
+  assert_not_contains "$out" "cannot reach the fleet's data/closed.md" \
+    "control: an intact pointer was reported as unreachable"
+
+  local case_label pointer expect n=0
+  while IFS='|' read -r case_label pointer expect; do
+    [ -n "$case_label" ] || continue
+    n=$((n + 1))
+    case "$pointer" in
+      missing) rm -f "$sub/config/primary-home" ;;
+      dangling) printf '%s\n' "$TMP_ROOT/broken-no-such-home" > "$sub/config/primary-home" ;;
+      empty) : > "$sub/config/primary-home" ;;
+      relative) printf 'not/an/absolute/path\n' > "$sub/config/primary-home" ;;
+    esac
+    write_brief "$sub" "broken-u$n" 'Add a settings screen for notification preferences.'
+    out=$(run_spawnable "$sub" "$wt" "broken-u$n" projects/alpha codex --why captain)
+    status=$?
+    expect_code 0 "$status" "$case_label: an unresolvable register refused the spawn instead of warning (got: $out)"
+    assert_contains "$out" "cannot reach the fleet's data/closed.md" "$case_label: the broken control was silent"
+    assert_contains "$out" "$expect" "$case_label: the warning did not name what could not be resolved"
+    assert_present "$sub/state/broken-u$n.meta" "$case_label: a warned spawn did not proceed"
+  done <<'ROWS'
+a missing pointer warns|missing|no main firstmate home recorded at
+a dangling pointer warns|dangling|which does not exist
+an empty pointer warns|empty|is empty
+a relative pointer warns|relative|must hold an absolute path
+ROWS
+
+  # The same broken control must be visible at session start in that home, not only
+  # at the moment of a spawn.
+  fakebin=$(fm_fakebin "$TMP_ROOT/broken-bootstrap")
+  fm_fake_exit0 "$fakebin" tmux node gh gh-axi chrome-devtools-axi lavish-axi curl jq treehouse no-mistakes
+  rm -f "$sub/config/primary-home"
+  boot=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$sub" FM_ROOT_OVERRIDE="$sub" TMUX='' "$BOOTSTRAP")
+  assert_contains "$boot" "CLOSED_TOPICS_UNRESOLVED:" "bootstrap in a secondmate home hid the broken register"
+
+  # Positive control for that absence: with the pointer restored, bootstrap reports
+  # the main home's closures instead of the unresolved line.
+  printf '%s\n' "$main" > "$sub/config/primary-home"
+  boot=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$sub" FM_ROOT_OVERRIDE="$sub" TMUX='' "$BOOTSTRAP")
+  assert_contains "$boot" "CLOSED_TOPICS: 1 closed at intake: deleted-user-backlog" \
+    "bootstrap in a secondmate home did not report the main home's closures"
+  assert_not_contains "$boot" "CLOSED_TOPICS_UNRESOLVED" "a resolvable register still reported as unresolved"
+  pass "gate 2: a secondmate home that cannot reach the register is loud, and still dispatches"
+}
+
+# The fleet access map is the same pointer and the same drift argument: the crews a
+# secondmate spawns are most of the fleet's crews, so they must get the captain's map
+# rather than an empty inventory.
+test_access_map_reaches_secondmate_homes() {
+  local main sub wt brief out
+  read -r main sub wt <<EOF
+$(secondmate_fixture accessmap)
+EOF
+  printf -- '- Sentry: MCP-backed. reach: probe first.\n- App Store Connect: reach: firstmate-only.\n' \
+    > "$main/data/access.md"
+  FM_ROOT_OVERRIDE='' FM_HOME="$sub" FM_DATA_OVERRIDE="$sub/data" \
+    FM_STATE_OVERRIDE="$sub/state" "$ROOT/bin/fm-brief.sh" access-sub-1 alpha >/dev/null 2>&1
+  brief="$sub/data/access-sub-1/brief.md"
+  assert_grep "## Fleet access map" "$brief" "a secondmate's crew brief lost the fleet access map"
+  assert_grep "App Store Connect: reach: firstmate-only." "$brief" \
+    "a secondmate's crew brief did not inject the main home's access map"
+
+  # Broken pointer: loud, and the routing rule still ships without a fabricated map.
+  rm -f "$sub/config/primary-home"
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$sub" FM_DATA_OVERRIDE="$sub/data" \
+    FM_STATE_OVERRIDE="$sub/state" "$ROOT/bin/fm-brief.sh" access-sub-2 alpha 2>&1 >/dev/null)
+  assert_contains "$out" "cannot reach the fleet's data/access.md" "an unreachable access map was silent"
+  brief="$sub/data/access-sub-2/brief.md"
+  assert_grep "# Access and routing" "$brief" "the structural access section vanished with an unreachable map"
+  assert_no_grep "## Fleet access map" "$brief" "an empty fleet map heading was emitted with an unreachable map"
+  pass "gate 4: the fleet access map reaches a secondmate's crews, and is loud when it cannot"
+}
+
 # An absent register is inert: no closure, no error, no behavior change.
 test_closed_absent_register() {
   local home wt out status
@@ -1073,7 +1253,11 @@ test_closed_malformed_line_is_loud
 test_closed_empty_keyword_entry_is_malformed
 test_closed_quoted_markers_in_task_body_still_match
 test_unfilled_brief_refuses
+test_placeholder_mention_in_task_body_spawns
 test_closed_absent_register
+test_closed_register_reaches_secondmate_homes
+test_secondmate_unresolvable_register_is_loud
+test_access_map_reaches_secondmate_homes
 test_meta_records_provenance
 test_brief_freshness_section
 test_brief_access_section

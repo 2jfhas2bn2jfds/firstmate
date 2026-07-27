@@ -11,12 +11,18 @@
 #   are not reasons to start work, and there is no tag for them. --secondmate is exempt:
 #   launching a persistent supervisor is lifecycle, not work.
 #   A ship or scout spawn also REFUSES (exit 4) when its brief still carries the
-#   scaffold's unreplaced {TASK} placeholder: the brief was never filled in, and an empty
-#   task body would leave gate 2 below with nothing to match.
+#   scaffold's unreplaced {TASK} placeholder on a line of its own: the brief was never
+#   filled in, and an empty task body would leave gate 2 below with nothing to match. A
+#   brief that merely mentions the placeholder in prose or a fenced block is unaffected.
 #   INTAKE GATE 2 - closed topics refuse at intake. The task id and the brief minus the
 #   regions fm-brief.sh both marked as boilerplate and opened with a generated heading are
-#   matched against data/closed.md (see bin/fm-closed-lib.sh for the register format and the
-#   exact matching rule); a match REFUSES and prints the closure line verbatim. A register
+#   matched against the fleet's data/closed.md (see bin/fm-closed-lib.sh for the register
+#   format and the exact matching rule); a match REFUSES and prints the closure line
+#   verbatim. The register is fleet-wide and lives in the MAIN firstmate home: a secondmate
+#   home reads that one register through the main-home pointer it records at seed time and
+#   on every --secondmate launch (bin/fm-fleet-home-lib.sh), never a copy of its own. A
+#   secondmate home that cannot resolve it has a broken control, not an empty one, so every
+#   ship and scout spawn from it WARNS loudly on stderr and proceeds. A register
 #   bullet that is not a well-formed entry (no second ':', empty slug, or no usable keyword)
 #   closes nothing, and is warned about on stderr rather than skipped silently.
 #   FM_CLOSED_EXPLAIN=1 prints the exact haystack the gate matched, how many marked regions
@@ -33,7 +39,9 @@
 #   see AGENTS.md task lifecycle); --secondmate records kind=secondmate and launches in a
 #   provisioned firstmate home; the default is kind=ship.
 #   Before a secondmate launch, the home is locally fast-forwarded to the primary
-#   default-branch commit when safe; skipped syncs warn and launch unchanged.
+#   default-branch commit when safe; skipped syncs warn and launch unchanged. The launch
+#   also rewrites that home's config/primary-home pointer, so the fleet's one closed-topic
+#   register and access map stay reachable from it.
 #   Ship/scout spawns refuse to launch after treehouse get unless the resolved pane
 #   path is a real git worktree root distinct from the primary project checkout.
 #   When config/git-author is present, the launch target (worktree or secondmate home)
@@ -78,7 +86,20 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-git-author-lib.sh"
 # shellcheck source=bin/fm-closed-lib.sh
 . "$SCRIPT_DIR/fm-closed-lib.sh"
-CLOSED="$DATA/closed.md"
+# shellcheck source=bin/fm-fleet-home-lib.sh
+. "$SCRIPT_DIR/fm-fleet-home-lib.sh"
+# The closed-topic register is fleet-wide and lives in the MAIN firstmate home.
+# Most crews here are dispatched by secondmates, so a per-home register would have
+# left gate 2 enforced where work is not started and inert everywhere it is; a
+# secondmate home reads the one register through its recorded pointer instead of
+# keeping a copy that would silently drift out of date. A pointer that cannot be
+# resolved is a BROKEN control rather than an empty one, so gate 2 below warns
+# loudly about it on every ship and scout spawn instead of passing quietly.
+CLOSED_UNRESOLVED=
+if ! CLOSED=$(fm_fleet_register "$FM_HOME" "$DATA" closed.md); then
+  CLOSED_UNRESOLVED=$CLOSED
+  CLOSED=
+fi
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
@@ -447,6 +468,19 @@ if [ "$KIND" = secondmate ]; then
   else
     echo "warning: secondmate $ID sync skipped before launch: primary default-branch commit cannot be resolved" >&2
   fi
+  # Point this home at the ONE main firstmate home whose data/closed.md and
+  # data/access.md it must read. Seeding records it; every launch rewrites it, so a
+  # home that was moved, re-registered, or seeded before this existed converges here
+  # rather than running on with a control it cannot reach. Resolved transitively, so
+  # a secondmate that launches another one hands down the same main home rather than
+  # starting a chain.
+  if sm_fleet_home=$(fm_primary_home "$FM_HOME"); then
+    if ! sm_ptr_err=$(fm_write_primary_home_pointer "$PROJ_ABS" "$sm_fleet_home"); then
+      echo "warning: secondmate $ID: could not record the main firstmate home: $sm_ptr_err" >&2
+    fi
+  else
+    echo "warning: secondmate $ID: cannot resolve the main firstmate home from $FM_HOME ($sm_fleet_home), so this home's closed-topic register and fleet access map stay unreachable" >&2
+  fi
   if [ -f "$PROJ_ABS/data/charter.md" ]; then
     BRIEF="$PROJ_ABS/data/charter.md"
   else
@@ -468,14 +502,22 @@ fi
 # an essentially empty haystack and the one un-talk-past-able gate quietly becomes a
 # no-op exactly when the brief is broken. Secondmate charters keep their own handling
 # (fm-brief.sh reports a charter that still carries the placeholder).
-if [ "$KIND" != secondmate ] && grep -qF '{TASK}' "$BRIEF"; then
+#
+# Matched ONLY where the scaffold leaves it: a line whose entire content is the
+# placeholder, never a substring inside prose or a fenced snippet. A task body is
+# free text, and in this repo a brief about the brief scaffold legitimately writes
+# "replace the {TASK} placeholder" or quotes it in a code block. This refusal has no
+# --reopen-closed equivalent and no override at all, so precision IS its whole safety
+# margin: an over-broad match here is unrecoverable except by rewording the task.
+if [ "$KIND" != secondmate ] && grep -qE '^[[:space:]]*\{TASK\}[[:space:]]*$' "$BRIEF"; then
   {
     echo "error: refusing to spawn $ID - the brief was never filled in."
-    echo "  $BRIEF still carries the scaffold's {TASK} placeholder."
+    echo "  $BRIEF still carries the scaffold's {TASK} placeholder on a line of its own."
     echo
-    echo "Replace it with the task description, acceptance criteria, and any context the"
-    echo "crewmate needs, then spawn again. An unfilled brief also empties the closed-topic"
-    echo "gate's haystack, so the closure check would pass without having checked anything."
+    echo "Fix it by filling in the brief's task section: replace that {TASK} line with the"
+    echo "task description, acceptance criteria, and any context the crewmate needs, then"
+    echo "spawn again. An unfilled brief also empties the closed-topic gate's haystack, so"
+    echo "the closure check would pass without having checked anything."
   } >&2
   exit 4
 fi
@@ -491,6 +533,10 @@ fi
 # for the register format and matching rule). Secondmate launches are exempt - they
 # carry a charter, not a task.
 #
+# The register is the fleet's one register in the MAIN firstmate home, resolved above:
+# most crews are dispatched by secondmates, so enforcing a per-home copy would enforce
+# closures everywhere except where work actually starts.
+#
 # The stripped regions are the ones fm-brief.sh both wrapped in its fm:boilerplate
 # markers AND opened with a generated heading: the conventions, setup, rules, freshness,
 # access-routing, fleet-map, project-memory and definition-of-done blocks it injects into
@@ -502,7 +548,14 @@ fi
 # heading widens the haystack rather than narrowing it, so the gate can never quietly cover
 # less than the captain believes. FM_CLOSED_EXPLAIN=1 shows exactly what was matched.
 REOPENED_CLOSED=
-if [ "$KIND" != secondmate ] && [ -f "$CLOSED" ]; then
+# An unresolvable register is not "no closures set": it is the gate having no idea
+# what the captain closed, which is exactly the state that must never pass quietly.
+# It warns rather than refuses, because failing closed on every dispatch from a
+# secondmate home would be its own outage.
+if [ "$KIND" != secondmate ] && [ -n "$CLOSED_UNRESOLVED" ]; then
+  fm_fleet_register_warning "$FM_HOME" closed.md "$CLOSED_UNRESOLVED"
+fi
+if [ "$KIND" != secondmate ] && [ -n "$CLOSED" ] && [ -f "$CLOSED" ]; then
   # A "- " line that is not a well-formed entry gates nothing, so say so out loud
   # rather than skipping it: a typo'd closure that fails silently leaves the captain
   # believing a topic is closed when the gate has quietly stopped covering it. It is

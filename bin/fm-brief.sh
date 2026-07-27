@@ -32,8 +32,8 @@
 # about LIVE state must be tagged [fetched <source> <ISO-8601 timestamp>], and an
 # untagged live-state claim is reported as unverified rather than as fact.
 # They also carry an access-and-routing section (probe a capability once, then escalate
-# a failed probe rather than working around it) with this home's data/access.md fleet
-# map appended when present, plus the matching access-wall rule: an unreachable
+# a failed probe rather than working around it) with the fleet's data/access.md map
+# appended when present, plus the matching access-wall rule: an unreachable
 # capability is escalated as a blocker, never downgraded into a caveat in the report.
 # Every generated brief (ship, scout, and the secondmate charter) also has the
 # captain's "## Engineering conventions" section from data/captain.md injected near
@@ -60,6 +60,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # live with the consumer that must recognise them, so the two cannot drift apart.
 # shellcheck source=bin/fm-closed-lib.sh
 . "$SCRIPT_DIR/fm-closed-lib.sh"
+# shellcheck source=bin/fm-fleet-home-lib.sh
+. "$SCRIPT_DIR/fm-fleet-home-lib.sh"
 BP_START=$FM_CLOSED_BOILERPLATE_START
 BP_END=$FM_CLOSED_BOILERPLATE_END
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
@@ -135,14 +137,22 @@ EOF
 }
 FRESHNESS_BLOCK=$(freshness_block_text)
 # The per-fleet access map, injected under the structural access section below.
-# Kept in this home's data/access.md - LOCAL and gitignored, because which
-# connectors, credentials and consoles exist is captain-specific while the routing
-# rule is shared - and pulled at generation time so it never goes stale in a
-# tracked file. Graceful no-op when absent: the structural section still ships,
-# because the part that must always reach a crewmate is "probe, then escalate",
-# not the inventory.
+# Kept in the MAIN firstmate home's data/access.md - LOCAL and gitignored, because
+# which connectors, credentials and consoles exist is captain-specific while the
+# routing rule is shared - and pulled at generation time so it never goes stale in a
+# tracked file. It is fleet-wide, so a secondmate home reads that one map through its
+# recorded main-home pointer rather than a copy of its own, exactly like the
+# closed-topic register (bin/fm-fleet-home-lib.sh); otherwise the crews a secondmate
+# spawns, which is most of the fleet's crews, would get an empty inventory. An
+# unresolvable pointer warns loudly rather than passing as "no map". Graceful no-op
+# when the map is simply absent: the structural section still ships, because the part
+# that must always reach a crewmate is "probe, then escalate", not the inventory.
 fleet_access_body() {
-  local access="$DATA/access.md"
+  local access
+  if ! access=$(fm_fleet_register "$FM_HOME" "$DATA" access.md); then
+    fm_fleet_register_warning "$FM_HOME" access.md "$access"
+    return 0
+  fi
   [ -f "$access" ] || return 0
   cat "$access"
 }

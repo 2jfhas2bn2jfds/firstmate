@@ -26,6 +26,7 @@ Personal preferences for one captain's fleet live locally in `data/captain.md`; 
 
 Topics the captain has closed live locally in `data/closed.md`; it is gitignored, because closures are captain-specific while the gate that enforces them is shared.
 `bin/fm-spawn.sh` matches every ship and scout spawn against it and refuses with exit 3 before any window or meta exists, printing the matching closure line verbatim; bootstrap reports the closed slugs once per session as `CLOSED_TOPICS:`.
+The register is fleet-wide and lives in the main firstmate home: a secondmate home keeps no copy of its own and reads that one file through its `config/primary-home` pointer, so a closure is enforced everywhere work is dispatched rather than only where the captain typed it (see [Fleet home pointer](#fleet-home-pointer-configprimary-home)).
 One entry per line:
 
 ```markdown
@@ -47,7 +48,7 @@ Everything else stays matched, including a task body's own `# ` headings, fenced
 Every uncertain case keeps the whole region or the whole brief rather than dropping any of it: a brief with no markers at all (hand-written, or generated before markers existed) is matched whole with no heading-text fallback, a brief whose markers do not balance is matched whole and reported on stderr, and a marked region that does not open with a generated section is kept and reported on stderr.
 Narrowing therefore fails toward a loud false refusal, undone with one flag, rather than toward a closure silently covering less than the captain believes.
 Set `FM_CLOSED_EXPLAIN=1` on a spawn to print the exact haystack the gate matched, how many marked regions were stripped, and how many were kept because they were not recognisable.
-A ship or scout spawn whose brief still carries the scaffold's unreplaced `{TASK}` placeholder refuses with exit 4 before this gate runs, because an unfilled brief would leave the closure check with nothing to match.
+A ship or scout spawn whose brief still carries the scaffold's unreplaced `{TASK}` placeholder on a line of its own refuses with exit 4 before this gate runs, because an unfilled brief would leave the closure check with nothing to match; a brief whose task body merely mentions the placeholder in prose or a fenced snippet is unaffected, because that refusal has no override and precision is its only safety margin.
 `--reopen-closed` is the one authorised bypass; it records `reopened_closed=<slug>` in the task's meta and is refused in batch dispatch, so one captain-authorised reopen never widens into a blanket bypass for every pair.
 
 ## Fleet access map (data/access.md)
@@ -56,6 +57,15 @@ What access this fleet has, where it lives, and how a crew reaches it lives loca
 `bin/fm-brief.sh` appends it to every ship and scout brief under the `## Fleet access map` heading, so crews get a current inventory instead of one asserted in a tracked file.
 There is no required format; keep it a short list per capability and mark firstmate-only capabilities explicitly, since crew reach varies by harness and pane.
 The file is optional: when it is absent the structural probe-then-escalate section still ships, because the half that always applies is the routing rule rather than the inventory.
+Like the closed-topic register it is fleet-wide and lives in the main firstmate home; a secondmate home reads it through the same `config/primary-home` pointer, so the crews a secondmate spawns get the captain's map rather than an empty inventory.
+
+## Fleet home pointer (config/primary-home)
+
+A secondmate home records the main firstmate home's absolute path in `config/primary-home`; it is local and gitignored, written by `bin/fm-home-seed.sh` at seed time and rewritten by `bin/fm-spawn.sh <id> --secondmate` on every launch, so a moved or re-registered home converges instead of running on with a control it cannot reach.
+It is a pointer rather than a copy of the fleet registers on purpose: a copy drifts, and a stale copy is a closure that silently expires.
+A main firstmate home has no pointer and no marker file, and reads its own `data/`.
+When a secondmate home cannot resolve it (no pointer recorded, empty, relative, a symlink, or naming a directory that does not exist), the closed-topic gate there is broken rather than empty, so it is loud: every ship and scout spawn from that home warns on stderr naming what could not be resolved, brief generation warns the same way about the access map, and that home's bootstrap prints `CLOSED_TOPICS_UNRESOLVED: <reason>`.
+It warns and proceeds rather than refusing, because failing closed on every dispatch from that home would be its own outage.
 
 ## Secondmate routes (data/secondmates.md)
 

@@ -8,6 +8,7 @@
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
 #                 "TASKS_AXI: available", "TANGLE: <remediation>",
 #                 "CLOSED_TOPICS: <n> closed at intake: <slugs>",
+#                 "CLOSED_TOPICS_UNRESOLVED: <reason>",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: <window-targets...>",
 #                 "FMX: X mode on ..." or "FMX: X mode off ...",
@@ -30,6 +31,10 @@
 #          fm-spawn refuses at intake (bin/fm-closed-lib.sh). It is printed only
 #          when data/closed.md holds at least one well-formed entry; an absent or
 #          entry-free register is silent, so bootstrap stays quiet by default.
+#          The register is fleet-wide and lives in the MAIN firstmate home; a
+#          secondmate home reads it through its recorded pointer, and prints
+#          "CLOSED_TOPICS_UNRESOLVED: <reason>" when it cannot reach it, because a
+#          gate that cannot see the closures is broken rather than empty.
 #          tasks-axi is an OPTIONAL backlog-management capability reported only
 #          when tasks-axi --version is 0.1.1 or newer. It is never a MISSING
 #          line and never prompts an install.
@@ -69,6 +74,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-tangle-lib.sh"
 # shellcheck source=bin/fm-closed-lib.sh
 . "$SCRIPT_DIR/fm-closed-lib.sh"
+# shellcheck source=bin/fm-fleet-home-lib.sh
+. "$SCRIPT_DIR/fm-fleet-home-lib.sh"
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 # shellcheck source=bin/fm-x-lib.sh
@@ -441,8 +448,18 @@ liveness_daemon_ensure() {
 # keyword list is empty or normalizes to nothing is one of those: it would otherwise
 # be counted in the CLOSED_TOPICS line, positively telling the captain a topic is
 # closed while the gate covered none of it.
+#
+# The register is fleet-wide and lives in the MAIN firstmate home, so a secondmate
+# home resolves it through its recorded pointer (bin/fm-fleet-home-lib.sh). A
+# secondmate home that cannot resolve it is NOT an all-good silence: the gate is
+# broken there rather than empty, and since most crews are dispatched by secondmates
+# that silence would hide the control being inert exactly where work starts.
 closed_topics_report() {
-  local register="$DATA/closed.md" slugs malformed count
+  local register slugs malformed count
+  if ! register=$(fm_fleet_register "$FM_HOME" "$DATA" closed.md); then
+    echo "CLOSED_TOPICS_UNRESOLVED: this secondmate home cannot reach the fleet's data/closed.md: $register"
+    return 0
+  fi
   [ -f "$register" ] || return 0
   malformed=$(fm_closed_malformed "$register")
   if [ -n "$malformed" ]; then
