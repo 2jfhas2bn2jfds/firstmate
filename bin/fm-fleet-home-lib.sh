@@ -13,10 +13,13 @@
 # had stopped covering the dispatches that matter.
 #
 # There is therefore ONE register, in the main home, and every secondmate home
-# reads it through a pointer file recorded at seed time (bin/fm-home-seed.sh) and
-# refreshed on every launch (bin/fm-spawn.sh --secondmate). A secondmate home
-# deliberately keeps NO copy of its own: a copy drifts, and a stale copy is a
-# closure that silently expires, which is the same failure in a new costume.
+# reads it through a pointer file recorded at seed time (bin/fm-home-seed.sh),
+# refreshed on every launch (bin/fm-spawn.sh --secondmate), and converged across
+# every live home at session start (bin/fm-bootstrap.sh), so a home seeded before
+# the pointer existed and one whose main home moved both catch up on their own.
+# A secondmate home deliberately keeps NO copy of the registers themselves: a copy
+# drifts, and a stale copy is a closure that silently expires, which is the same
+# failure in a new costume.
 #
 # The pointer is the one new thing that can break, so it breaks LOUD:
 #   - a MAIN home with no register simply has no closures set. Silent, by design,

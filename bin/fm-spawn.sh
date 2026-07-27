@@ -2,6 +2,7 @@
 # Spawn a direct report: a crewmate in a treehouse worktree, or a secondmate in
 # its isolated firstmate home.
 # Usage: fm-spawn.sh <task-id> <project-dir> --why <tag>[:<note>] [harness|launch-command] [--scout]
+#        [--reopen-closed] [--allow-unfilled-task]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [harness|launch-command] --secondmate
 #   INTAKE GATE 1 - self-initiated work defaults to OFF. Every ship and scout spawn
 #   REFUSES unless --why declares why the work exists, with one of exactly three tags:
@@ -10,10 +11,14 @@
 #   task's meta. "Interesting", "worth doing", "found while looking at X" and "tidy-up"
 #   are not reasons to start work, and there is no tag for them. --secondmate is exempt:
 #   launching a persistent supervisor is lifecycle, not work.
-#   A ship or scout spawn also REFUSES (exit 4) when its brief still carries the
-#   scaffold's unreplaced {TASK} placeholder on a line of its own: the brief was never
-#   filled in, and an empty task body would leave gate 2 below with nothing to match. A
-#   brief that merely mentions the placeholder in prose or a fenced block is unaffected.
+#   INTAKE GATE 2a - a ship or scout spawn also REFUSES (exit 4) when its brief still
+#   carries the scaffold's unreplaced {TASK} placeholder on a line of its own, OUTSIDE any
+#   fenced code block: the brief was never filled in, and an empty task body would leave
+#   gate 2 below with nothing to match. A brief that mentions the placeholder in prose, or
+#   demonstrates the scaffold's shape inside a fence, is unaffected.
+#   --allow-unfilled-task proceeds anyway, records allowed_unfilled_task=1 in meta, and
+#   prints a loud warning; like --reopen-closed it is a per-task waiver, so batch dispatch
+#   REFUSES it (exit 2) rather than waiving the check for every pair.
 #   INTAKE GATE 2 - closed topics refuse at intake. The task id and the brief minus the
 #   regions fm-brief.sh both marked as boilerplate and opened with a generated heading are
 #   matched against the fleet's data/closed.md (see bin/fm-closed-lib.sh for the register
@@ -112,6 +117,7 @@ CLOSED_SHADOW=$(fm_fleet_shadow_register "$FM_HOME" "$DATA" closed.md)
 KIND=ship
 WHY=
 REOPEN_CLOSED=
+ALLOW_UNFILLED_TASK=
 POS=()
 
 # INTAKE GATE 1: self-initiated work defaults to OFF.
@@ -146,6 +152,7 @@ while [ $# -gt 0 ]; do
     --scout) KIND=scout ;;
     --secondmate) KIND=secondmate ;;
     --reopen-closed) REOPEN_CLOSED=1 ;;
+    --allow-unfilled-task) ALLOW_UNFILLED_TASK=1 ;;
     --why)
       if [ $# -lt 2 ]; then
         why_refusal "--why was given with no value"
@@ -206,6 +213,17 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
       echo "Reopening a closed topic is a per-task authorisation from the captain; a shared flag"
       echo "would bypass the closed-topic gate for every pair in the batch. Spawn the authorised"
       echo "task on its own with --reopen-closed, and batch the rest."
+    } >&2
+    exit 2
+  fi
+  # Same reasoning for the unfilled-brief override: it says "I looked at THIS brief and
+  # it is deliberately shaped like the scaffold", which is a statement about one task.
+  if [ -n "$ALLOW_UNFILLED_TASK" ]; then
+    {
+      echo "error: --allow-unfilled-task is not accepted in batch dispatch."
+      echo "It is a per-task judgement about one brief; a shared flag would waive the unfilled-brief"
+      echo "check for every pair in the batch. Spawn that task on its own with --allow-unfilled-task,"
+      echo "and batch the rest."
     } >&2
     exit 2
   fi
@@ -510,22 +528,60 @@ fi
 # (fm-brief.sh reports a charter that still carries the placeholder).
 #
 # Matched ONLY where the scaffold leaves it: a line whose entire content is the
-# placeholder, never a substring inside prose or a fenced snippet. A task body is
-# free text, and in this repo a brief about the brief scaffold legitimately writes
-# "replace the {TASK} placeholder" or quotes it in a code block. This refusal has no
-# --reopen-closed equivalent and no override at all, so precision IS its whole safety
-# margin: an over-broad match here is unrecoverable except by rewording the task.
-if [ "$KIND" != secondmate ] && grep -qE '^[[:space:]]*\{TASK\}[[:space:]]*$' "$BRIEF"; then
-  {
-    echo "error: refusing to spawn $ID - the brief was never filled in."
-    echo "  $BRIEF still carries the scaffold's {TASK} placeholder on a line of its own."
-    echo
-    echo "Fix it by filling in the brief's task section: replace that {TASK} line with the"
-    echo "task description, acceptance criteria, and any context the crewmate needs, then"
-    echo "spawn again. An unfilled brief also empties the closed-topic gate's haystack, so"
-    echo "the closure check would pass without having checked anything."
-  } >&2
-  exit 4
+# placeholder, OUTSIDE any fenced code block. A task body is free text, and in this
+# repo a brief about the brief scaffold legitimately writes "replace the {TASK}
+# placeholder" in prose and demonstrates the scaffold's shape in a fence:
+#
+#     ```markdown
+#     # Task
+#     {TASK}
+#     ```
+#
+# so both forms have to pass. The fence tracking is deliberately the whole of the
+# markdown this check understands: it is a collision guard, not a parser.
+#
+# --allow-unfilled-task is the escape hatch, and it exists because a check with no
+# recourse eventually blocks legitimate work with no way through - gate 2 itself has
+# --reopen-closed, and this check must not be stricter than the closure gate. Like
+# that flag it is loud and recorded in meta, so the waiver leaves a trace.
+brief_has_unfilled_task() {
+  awk '
+    function trim(t) { sub(/^[ \t]+/, "", t); sub(/[ \t\r]+$/, "", t); return t }
+    {
+      line = trim($0)
+      if (line ~ /^(```|~~~)/) {
+        if (!fence) { fence = 1; marker = substr(line, 1, 3) }
+        else if (substr(line, 1, 3) == marker) fence = 0
+        next
+      }
+      if (!fence && line == "{TASK}") { found = 1; exit }
+    }
+    END { exit(found ? 0 : 1) }
+  ' "$1"
+}
+UNFILLED_TASK_ALLOWED=
+if [ "$KIND" != secondmate ] && brief_has_unfilled_task "$BRIEF"; then
+  if [ -n "$ALLOW_UNFILLED_TASK" ]; then
+    UNFILLED_TASK_ALLOWED=1
+    {
+      echo "!!! WARNING: --allow-unfilled-task is waiving the unfilled-brief check."
+      echo "!!! $BRIEF carries the scaffold's {TASK} placeholder on a line of its own."
+      echo "!!! An unfilled task body also narrows what the closed-topic gate can match."
+      echo "!!! Recorded in $STATE/$ID.meta."
+    } >&2
+  else
+    {
+      echo "error: refusing to spawn $ID - the brief was never filled in."
+      echo "  $BRIEF still carries the scaffold's {TASK} placeholder on a line of its own."
+      echo
+      echo "Fix it by filling in the brief's task section: replace that {TASK} line with the"
+      echo "task description, acceptance criteria, and any context the crewmate needs, then"
+      echo "spawn again. An unfilled brief also empties the closed-topic gate's haystack, so"
+      echo "the closure check would pass without having checked anything. If that line is"
+      echo "deliberately part of the task, pass --allow-unfilled-task (it is recorded in meta)."
+    } >&2
+    exit 4
+  fi
 fi
 
 # INTAKE GATE 2: closed topics refuse at intake.
@@ -770,10 +826,12 @@ mkdir -p "$STATE"
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
   else
-    # Why this work exists (intake gate 1) and any closure it overrode (gate 2), so the
-    # provenance of a task survives the session that dispatched it.
+    # Why this work exists (intake gate 1), any closure it overrode (gate 2), and any
+    # waived unfilled-brief check (gate 2a), so the provenance of a task - including
+    # every gate it was let through - survives the session that dispatched it.
     echo "why=$WHY_RECORD"
     if [ -n "$REOPENED_CLOSED" ]; then echo "reopened_closed=$REOPENED_CLOSED"; fi
+    if [ -n "$UNFILLED_TASK_ALLOWED" ]; then echo "allowed_unfilled_task=1"; fi
   fi
 } > "$STATE/$ID.meta"
 

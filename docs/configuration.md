@@ -50,7 +50,9 @@ Everything else stays matched, including a task body's own `# ` headings, fenced
 Every uncertain case keeps the whole region or the whole brief rather than dropping any of it: a brief with no markers at all (hand-written, or generated before markers existed) is matched whole with no heading-text fallback, a brief whose markers do not balance is matched whole and reported on stderr, and a marked region that does not open with a generated section is kept and reported on stderr.
 Narrowing therefore fails toward a loud false refusal, undone with one flag, rather than toward a closure silently covering less than the captain believes.
 Set `FM_CLOSED_EXPLAIN=1` on a spawn to print the exact haystack the gate matched, how many marked regions were stripped, and how many were kept because they were not recognisable.
-A ship or scout spawn whose brief still carries the scaffold's unreplaced `{TASK}` placeholder on a line of its own refuses with exit 4 before this gate runs, because an unfilled brief would leave the closure check with nothing to match; a brief whose task body merely mentions the placeholder in prose or a fenced snippet is unaffected, because that refusal has no override and precision is its only safety margin.
+A ship or scout spawn whose brief still carries the scaffold's unreplaced `{TASK}` placeholder on a line of its own, outside any fenced code block, refuses with exit 4 before this gate runs, because an unfilled brief would leave the closure check with nothing to match.
+A brief whose task body mentions the placeholder in prose, or demonstrates the scaffold's shape inside a fence, is unaffected: the task body is free text, and a brief about the brief scaffold legitimately does both.
+`--allow-unfilled-task` waives that check, warns loudly, and records `allowed_unfilled_task=1` in the task's meta; like `--reopen-closed` it is a per-task waiver, so batch dispatch refuses it.
 `--reopen-closed` is the one authorised bypass; it records `reopened_closed=<slug>` in the task's meta and is refused in batch dispatch, so one captain-authorised reopen never widens into a blanket bypass for every pair.
 
 ## Fleet access map (data/access.md)
@@ -64,7 +66,8 @@ A map written into a secondmate home's own `data/access.md` reaches no brief, so
 
 ## Fleet home pointer (config/primary-home)
 
-A secondmate home records the main firstmate home's absolute path in `config/primary-home`; it is local and gitignored, written by `bin/fm-home-seed.sh` at seed time and rewritten by `bin/fm-spawn.sh <id> --secondmate` on every launch, so a moved or re-registered home converges instead of running on with a control it cannot reach.
+A secondmate home records the main firstmate home's absolute path in `config/primary-home`; it is local and gitignored, written by `bin/fm-home-seed.sh` at seed time, rewritten by `bin/fm-spawn.sh <id> --secondmate` on every launch, and refreshed across every live secondmate home by `bin/fm-bootstrap.sh` at session start, so a moved or re-registered home, or one seeded before the pointer existed, converges instead of running on with a control it cannot reach.
+That session-start convergence is silent and best-effort: an unmigrated home is not a broken one, and warning on its every routine dispatch until someone relaunches it would only teach the operator to skim the warning that matters.
 It is a pointer rather than a copy of the fleet registers on purpose: a copy drifts, and a stale copy is a closure that silently expires.
 A main firstmate home has no pointer and no marker file, and reads its own `data/`.
 The recorded path has to be a main firstmate home, not merely a directory that exists: a target carrying the secondmate marker, or missing `AGENTS.md`, `bin/`, or `data/`, is rejected like any other broken pointer.

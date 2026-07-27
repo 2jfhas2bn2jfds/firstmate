@@ -142,6 +142,60 @@ FM_CLOSED_BOILERPLATE_END='<!-- fm:boilerplate end -->'
 # a heading renamed there and not here keeps MORE text, which is the loud direction.
 FM_CLOSED_INJECTED_OPENERS='You are a crewmate:|# Engineering conventions|# Setup|# Rules|# Freshness provenance|# Access and routing|## Fleet access map|# Project memory|# Definition of done'
 
+# The frame between fm_closed_walk and its callers: the walk emits one status line
+# carrying this prefix, then the retained body. It is internal plumbing, never part
+# of a brief and never matched against the register.
+FM_CLOSED_WALK_STATUS='fm-closed-walk-status:'
+
+# fm_closed_walk <brief-file>: the ONE pass over a brief that both the marker status
+# and the haystack body are derived from.
+#
+# Prints "<sentinel> <state> <stripped> <kept>" and then every line the haystack
+# keeps. Status and body come out of the same walk on purpose: the kept count drives
+# the stderr warning that describes what the body actually kept, so two programs that
+# merely agreed by hand could drift into a gate warning about a different set of
+# regions than it matched.
+fm_closed_walk() {
+  local brief=$1
+  awk -v s="$FM_CLOSED_BOILERPLATE_START" -v e="$FM_CLOSED_BOILERPLATE_END" \
+      -v openers="$FM_CLOSED_INJECTED_OPENERS" -v sentinel="$FM_CLOSED_WALK_STATUS" '
+    function trim(t) { sub(/^[ \t]+/, "", t); sub(/[ \t\r]+$/, "", t); return t }
+    function generated(t,   i, n, o) {
+      if (t == "") return 0
+      n = split(openers, o, "[|]")
+      for (i = 1; i <= n; i++) if (index(t, o[i]) == 1) return 1
+      return 0
+    }
+    function emit_all(   i) { for (i = 0; i < nall; i++) print all[i] }
+    {
+      all[nall++] = $0
+      line = trim($0)
+      if (line == s) { seen++; if (open) bad = 1; open = 1; nb = 0; first = ""; buf[nb++] = $0; next }
+      if (line == e) {
+        seen++
+        buf[nb++] = $0
+        if (!open) bad = 1
+        else if (generated(first)) stripped++
+        else { kept++; for (i = 0; i < nb; i++) keep[nkeep++] = buf[i] }
+        open = 0
+        nb = 0
+        next
+      }
+      if (open) { buf[nb++] = $0; if (first == "" && line != "") first = line; next }
+      keep[nkeep++] = $0
+    }
+    END {
+      if (open) bad = 1
+      # Every uncertain case keeps the WHOLE file: confidence is the precondition
+      # for dropping anything (see fm_closed_haystack_body).
+      if (!seen) { print sentinel " none 0 0"; emit_all(); exit }
+      if (bad) { print sentinel " unbalanced 0 0"; emit_all(); exit }
+      print sentinel " ok " stripped + 0 " " kept + 0
+      for (i = 0; i < nkeep; i++) print keep[i]
+    }
+  ' "$brief"
+}
+
 # fm_closed_marker_status <brief-file>: print "<state> <stripped> <kept>" where state is
 #   none        the file carries no boilerplate markers at all
 #   ok          every marker is balanced and non-nested; <stripped> counts the regions
@@ -154,35 +208,7 @@ fm_closed_marker_status() {
     printf 'none 0 0\n'
     return 0
   fi
-  awk -v s="$FM_CLOSED_BOILERPLATE_START" -v e="$FM_CLOSED_BOILERPLATE_END" \
-      -v openers="$FM_CLOSED_INJECTED_OPENERS" '
-    function trim(t) { sub(/^[ \t]+/, "", t); sub(/[ \t\r]+$/, "", t); return t }
-    function generated(t,   i, n, o) {
-      if (t == "") return 0
-      n = split(openers, o, "[|]")
-      for (i = 1; i <= n; i++) if (index(t, o[i]) == 1) return 1
-      return 0
-    }
-    {
-      line = trim($0)
-      if (line == s) { seen++; if (open) bad = 1; open = 1; first = ""; next }
-      if (line == e) {
-        seen++
-        if (!open) bad = 1
-        else if (generated(first)) stripped++
-        else kept++
-        open = 0
-        next
-      }
-      if (open && first == "" && line != "") first = line
-    }
-    END {
-      if (open) bad = 1
-      if (!seen) { print "none 0 0"; exit }
-      if (bad) { print "unbalanced 0 0"; exit }
-      print "ok " stripped + 0 " " kept + 0
-    }
-  ' "$brief"
+  fm_closed_walk "$brief" | head -n 1 | cut -d' ' -f2-
 }
 
 # fm_closed_haystack_body <brief-file>: print the whole brief MINUS the regions
@@ -220,14 +246,19 @@ fm_closed_marker_status() {
 #     worst case is a false refusal, which is loud, visible to whoever ran the spawn,
 #     and undone with one flag.
 # Do not "simplify" this back into a heading-text stripper, a marker-only stripper,
-# or a task-section extractor.
+# or a task-section extractor. Do not split it back into two walks either: the counts
+# in the warnings and the body they describe both come from fm_closed_walk, so they
+# cannot drift into warning about a different set of regions than was matched.
 #
 # Set FM_CLOSED_EXPLAIN=1 on a spawn to see the exact haystack this produced and how
 # many marked regions it removed.
 fm_closed_haystack_body() {
-  local brief=$1 status state stripped kept
+  local brief=$1 walked status state stripped kept
   [ -f "$brief" ] || return 0
-  status=$(fm_closed_marker_status "$brief")
+  # ONE walk, consumed twice: the warnings below describe exactly the body printed
+  # after them, because both come out of the same pass.
+  walked=$(fm_closed_walk "$brief")
+  status=$(printf '%s\n' "$walked" | head -n 1 | cut -d' ' -f2-)
   read -r state stripped kept <<EOF
 $status
 EOF
@@ -241,29 +272,6 @@ EOF
           echo "  a spawn that a correctly generated brief would not."
         } >&2
       fi
-      awk -v s="$FM_CLOSED_BOILERPLATE_START" -v e="$FM_CLOSED_BOILERPLATE_END" \
-          -v openers="$FM_CLOSED_INJECTED_OPENERS" '
-        function trim(t) { sub(/^[ \t]+/, "", t); sub(/[ \t\r]+$/, "", t); return t }
-        function generated(t,   i, n, o) {
-          if (t == "") return 0
-          n = split(openers, o, "[|]")
-          for (i = 1; i <= n; i++) if (index(t, o[i]) == 1) return 1
-          return 0
-        }
-        {
-          line = trim($0)
-          if (line == s) { open = 1; nb = 0; first = ""; buf[nb++] = $0; next }
-          if (line == e) {
-            buf[nb++] = $0
-            if (!generated(first)) for (i = 0; i < nb; i++) print buf[i]
-            open = 0
-            nb = 0
-            next
-          }
-          if (open) { buf[nb++] = $0; if (first == "" && line != "") first = line; next }
-          print
-        }
-      ' "$brief"
       ;;
     unbalanced)
       {
@@ -272,12 +280,9 @@ EOF
         echo "  against the closed-topic register instead, which may refuse a spawn that a"
         echo "  correctly marked brief would not. Regenerate the brief with bin/fm-brief.sh."
       } >&2
-      cat "$brief"
-      ;;
-    *)
-      cat "$brief"
       ;;
   esac
+  printf '%s\n' "$walked" | tail -n +2
 }
 
 # fm_closed_match <register> <haystack-file>: print every matching entry as

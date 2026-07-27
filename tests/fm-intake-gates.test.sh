@@ -826,6 +826,82 @@ EOF
   pass "spawn: only the scaffold's own standalone {TASK} line counts as an unfilled brief"
 }
 
+# A fenced block is exactly where a brief about the brief scaffold demonstrates the
+# shape it is asking someone to change, so the placeholder standing alone on its own
+# line INSIDE a fence is ordinary task text, not an unfilled brief. Both fence forms
+# are covered, because a markdown fence is either backticks or tildes.
+test_placeholder_inside_fence_spawns() {
+  local home wt out status label body n=0
+  read -r home wt <<EOF
+$(spawnable_home placeholder-fence)
+EOF
+  while IFS='|' read -r label body; do
+    [ -n "$label" ] || continue
+    n=$((n + 1))
+    write_brief "$home" "fence-q$n" "$body"
+    out=$(run_spawnable "$home" "$wt" "fence-q$n" projects/alpha codex --why captain)
+    status=$?
+    expect_code 0 "$status" "$label: a fenced placeholder was read as an unfilled brief (got: $out)"
+    assert_not_contains "$out" "never filled in" "$label: the unfilled-brief refusal fired inside a fence"
+    assert_present "$home/state/fence-q$n.meta" "$label: a legitimate brief did not spawn"
+  done <<'ROWS'
+backtick fence|# Task\nRewrite the scaffold so the task section:\n\n```markdown\n# Task\n{TASK}\n```\n\nis replaced before spawning.\n
+tilde fence|# Task\nRewrite the scaffold so the task section:\n\n~~~markdown\n# Task\n{TASK}\n~~~\n\nis replaced before spawning.\n
+fence reopened after a closed one|# Task\nFirst show the scaffold:\n\n```markdown\n{TASK}\n```\n\nThen show it again:\n\n```markdown\n{TASK}\n```\n
+ROWS
+
+  # Positive control on the same fixture: the identical prose with the placeholder
+  # standing alone OUTSIDE any fence still refuses, so the passes above cannot be the
+  # check having simply stopped firing.
+  write_brief "$home" fence-q9 '# Task\nRewrite the scaffold so the task section:\n\n```markdown\n# Task\n```\n\nis replaced before spawning.\n\n{TASK}\n'
+  out=$(run_spawnable "$home" "$wt" fence-q9 projects/alpha codex --why captain)
+  status=$?
+  expect_code 4 "$status" "control: a placeholder outside every fence spawned anyway (got: $out)"
+  assert_contains "$out" "the brief was never filled in" "control: the refusal text changed"
+  assert_absent "$home/state/fence-q9.meta" "control: a refused spawn still wrote meta"
+  pass "spawn: a {TASK} line inside a fenced block is task text, not an unfilled brief"
+}
+
+# A check with no escape hatch eventually blocks legitimate work with no recourse, and
+# gate 2 itself has --reopen-closed, so the unfilled-brief check must not be stricter
+# than the closure gate. The waiver is loud and leaves a trace in meta, and - like the
+# reopen it mirrors - it is a per-task judgement, so batch dispatch refuses it.
+test_allow_unfilled_task_override() {
+  local home wt out status
+  read -r home wt <<EOF
+$(spawnable_home allow-unfilled)
+EOF
+  # Control first: without the flag the same brief refuses.
+  write_brief "$home" allow-r1 'Rewrite the brief scaffold.\n\n# Task\n{TASK}\n'
+  out=$(run_spawnable "$home" "$wt" allow-r1 projects/alpha codex --why captain)
+  status=$?
+  expect_code 4 "$status" "control: an unfilled brief spawned without the waiver (got: $out)"
+  assert_contains "$out" "pass --allow-unfilled-task" "the refusal does not name its own escape hatch"
+
+  write_brief "$home" allow-r2 'Rewrite the brief scaffold.\n\n# Task\n{TASK}\n'
+  out=$(run_spawnable "$home" "$wt" allow-r2 projects/alpha codex --why captain --allow-unfilled-task)
+  status=$?
+  expect_code 0 "$status" "the waiver did not let the spawn through (got: $out)"
+  assert_contains "$out" "WARNING: --allow-unfilled-task is waiving the unfilled-brief check" \
+    "the waiver was silent instead of loud"
+  assert_grep "allowed_unfilled_task=1" "$home/state/allow-r2.meta" "the waiver left no trace in meta"
+
+  # A spawn that never needed the waiver must not record one, or the trace means nothing.
+  write_brief "$home" allow-r3 'Add a settings screen for notification preferences.'
+  out=$(run_spawnable "$home" "$wt" allow-r3 projects/alpha codex --why captain)
+  status=$?
+  expect_code 0 "$status" "control: a filled brief was refused (got: $out)"
+  assert_no_grep "allowed_unfilled_task=" "$home/state/allow-r3.meta" "meta recorded a waiver that never happened"
+
+  out=$(run_spawn "$home" au-t1=projects/alpha au-t2=projects/alpha --why captain --allow-unfilled-task)
+  status=$?
+  expect_code 2 "$status" "batch --allow-unfilled-task"
+  assert_contains "$out" "--allow-unfilled-task is not accepted in batch dispatch" \
+    "batch --allow-unfilled-task was not refused"
+  assert_not_contains "$out" "batch:" "batch --allow-unfilled-task still dispatched pairs"
+  pass "spawn: --allow-unfilled-task waives the unfilled-brief check loudly, per task, and is recorded"
+}
+
 # --- gate 2 across homes: the register is fleet-wide ------------------------
 
 # secondmate_fixture <name>: a MAIN firstmate home plus a REAL secondmate home
@@ -1027,6 +1103,62 @@ EOF
   boot=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$sub" FM_ROOT_OVERRIDE="$sub" TMUX='' "$BOOTSTRAP")
   assert_not_contains "$boot" "CLOSED_TOPICS_LOCAL_IGNORED" "a home with no local register still reported one"
   pass "gate 2: a secondmate home's own closed.md is reported as ignored, and never honoured"
+}
+
+# The pointer used to be written only at seed time and at launch, so every home seeded
+# before it existed stayed unmigrated: loud on every routine dispatch until someone
+# relaunched it. An unmigrated control is not a broken one, and routine output full of
+# warnings teaches people to skim the warning that matters, so the fleet converges at
+# session start instead.
+test_bootstrap_migrates_secondmate_pointer() {
+  local main sub wt out status fakebin boot
+  read -r main sub wt <<EOF
+$(secondmate_fixture ptrmigrate)
+EOF
+  printf -- '- deleted-user-backlog: deleted user backlog: closed by the captain (closed 2026-07-25)\n' \
+    > "$main/data/closed.md"
+  # A home seeded before the pointer existed: it has none, so the register is
+  # unreachable and the gate is loud rather than enforcing.
+  rm -f "$sub/config/primary-home"
+  write_brief "$sub" ptr-s0 'Drain the deleted user backlog and report what is left.'
+  out=$(run_spawnable "$sub" "$wt" ptr-s0 projects/alpha codex --why captain)
+  status=$?
+  expect_code 0 "$status" "an unmigrated home refused the spawn instead of warning (got: $out)"
+  assert_contains "$out" "cannot reach the fleet's data/closed.md" "an unmigrated home was silent"
+
+  printf 'window=firstmate:fm-ptrmigrate\nkind=secondmate\nhome=%s\n' "$sub" \
+    > "$main/state/ptrmigrate.meta"
+  fakebin=$(fm_fakebin "$TMP_ROOT/ptrmigrate-bootstrap")
+  fm_fake_exit0 "$fakebin" tmux node gh gh-axi chrome-devtools-axi lavish-axi curl jq treehouse no-mistakes
+  boot=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$main" FM_ROOT_OVERRIDE="$main" TMUX='' "$BOOTSTRAP" 2>/dev/null)
+  assert_present "$sub/config/primary-home" "bootstrap did not converge an unmigrated secondmate home"
+  [ "$(cd "$(cat "$sub/config/primary-home")" && pwd)" = "$(cd "$main" && pwd)" ] \
+    || fail "bootstrap recorded the wrong main firstmate home"
+  assert_not_contains "$boot" "primary-home" "a routine pointer refresh was reported to the operator"
+
+  # The migration is only real if the gate it feeds now fires from that home.
+  write_brief "$sub" ptr-s1 'Drain the deleted user backlog and report what is left.'
+  out=$(run_spawnable "$sub" "$wt" ptr-s1 projects/alpha codex --why captain)
+  status=$?
+  expect_code 3 "$status" "a converged home did not enforce the main register (got: $out)"
+  assert_not_contains "$out" "cannot reach the fleet's data/closed.md" "a converged home still warned"
+
+  # Negative control on the same converged home: unrelated work still spawns, so the
+  # refusal above is the register matching rather than the home refusing everything.
+  write_brief "$sub" ptr-s2 'Add a settings screen for notification preferences.'
+  out=$(run_spawnable "$sub" "$wt" ptr-s2 projects/alpha codex --why captain)
+  status=$?
+  expect_code 0 "$status" "control: unrelated work from a converged home was refused (got: $out)"
+
+  # A home whose main home MOVED converges too: that refresh is the property that made
+  # a pointer preferable to copying the register into every home.
+  printf '%s\n' "$TMP_ROOT/ptrmigrate-elsewhere" > "$sub/config/primary-home"
+  mkdir -p "$TMP_ROOT/ptrmigrate-elsewhere/bin" "$TMP_ROOT/ptrmigrate-elsewhere/data"
+  printf '# Firstmate\n' > "$TMP_ROOT/ptrmigrate-elsewhere/AGENTS.md"
+  PATH="$fakebin:$BASE_PATH" FM_HOME="$main" FM_ROOT_OVERRIDE="$main" TMUX='' "$BOOTSTRAP" >/dev/null 2>&1
+  [ "$(cd "$(cat "$sub/config/primary-home")" && pwd)" = "$(cd "$main" && pwd)" ] \
+    || fail "bootstrap did not refresh a pointer aimed at a stale main firstmate home"
+  pass "bootstrap converges every live secondmate home on this session's main firstmate home"
 }
 
 # The fleet access map is the same pointer and the same drift argument: the crews a
@@ -1335,10 +1467,13 @@ test_closed_empty_keyword_entry_is_malformed
 test_closed_quoted_markers_in_task_body_still_match
 test_unfilled_brief_refuses
 test_placeholder_mention_in_task_body_spawns
+test_placeholder_inside_fence_spawns
+test_allow_unfilled_task_override
 test_closed_absent_register
 test_closed_register_reaches_secondmate_homes
 test_secondmate_unresolvable_register_is_loud
 test_secondmate_local_register_is_reported
+test_bootstrap_migrates_secondmate_pointer
 test_access_map_reaches_secondmate_homes
 test_meta_records_provenance
 test_brief_freshness_section
