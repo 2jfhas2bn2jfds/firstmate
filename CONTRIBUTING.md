@@ -42,6 +42,9 @@ See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/star
   Each starts with a usage header comment; keep it accurate when you change behavior.
   Test scripts and helpers in `tests/` are plain bash too.
   `shellcheck bin/*.sh tests/*.sh` must pass, and CI enforces it.
+- CI also guards the shape of the tree: tracked files at the repo root are limited to a small allowlist, and every tracked path may use only `[A-Za-z0-9._/-]`.
+  Both jobs exist because a mis-quoted shell redirect once committed a junk-named duplicate of the test suite that every other job passed.
+  A deliberate new root file or unusual path name is a one-line change to the matching job in `.github/workflows/ci.yml`.
 - Changes to harness adapters (launch templates in `bin/fm-spawn.sh`, facts in `.agents/skills/harness-adapters/SKILL.md`) must be verified empirically against the real harness, never written from documentation alone.
 - In Markdown, put each full sentence on its own line.
 
