@@ -64,6 +64,16 @@ GLOBAL_FAKEBIN=$(make_fake_tmux "$TMP_ROOT/global-fake")
 run_spawn() {
   local home=$1
   shift
+  # Pin the crewmate harness for this home. fm-spawn resolves the launch
+  # template BEFORE it reaches the missing-brief error that the gate rows key on
+  # as "the gate passed", so on a machine where ambient harness detection finds
+  # nothing (no CLAUDECODE, no harness in the process ancestry) every such spawn
+  # would fail earlier and for an unrelated reason. Pinning keeps these tests
+  # about the gates rather than about the developer's environment.
+  [ -f "$home/config/crew-harness" ] || {
+    mkdir -p "$home/config"
+    printf 'codex\n' > "$home/config/crew-harness"
+  }
   PATH="$GLOBAL_FAKEBIN:$PATH" \
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
