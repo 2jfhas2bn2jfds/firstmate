@@ -80,6 +80,7 @@ data/                personal fleet records; LOCAL, gitignored as a whole
   captain.md         captain's curated personal preferences and working style; LOCAL, gitignored, and canonical even if harness memory mirrors it
   projects.md        thin fleet navigation registry; firstmate-private, parsed by fm-project-mode.sh (section 6)
   secondmates.md      secondmate routing table; firstmate-private, maintained by fm-home-seed.sh (section 6)
+  access.md          fleet access map: what access exists, where it lives, and how a crew reaches it (marking firstmate-only capabilities); LOCAL, gitignored, injected into every ship and scout brief by fm-brief.sh (section 11)
   closed.md          topics the captain has closed; LOCAL, gitignored (closures are captain-specific, the mechanism is shared). fm-spawn refuses any ship/scout spawn matching one (section 7); bootstrap reports the count and slugs (section 3)
   <id>/brief.md      per-task crewmate brief, or per-secondmate charter brief when kind=secondmate
   <id>/report.md     scout task deliverable, written by the crewmate; survives teardown
@@ -628,6 +629,14 @@ Otherwise it is relayed as "not checked", and that "not checked" travels with th
 Specificity is not freshness: a detailed, confident, internally consistent description of a live artefact reads identically whether it is current or months stale, so neither the detail nor your confidence in it is evidence of recency.
 This is a loud rule, not an enforced one - nothing in the machinery can tell a fresh claim from a stale one - so it holds only if you apply it every time.
 
+**An unclosed gap in a crew's report is closed or explicitly dropped, never left sitting.**
+When a crewmate reports that it could not reach something - a connector, a credential, a console, production data - that gap becomes yours the moment you read it, because your own session holds the fleet's connectors and credentials and a crewmate's pane may not.
+Close it: run the query yourself, which is usually one call, and fold the answer into what you relay.
+Or drop it explicitly: tell the captain the answer stands without that piece and what it costs, so the captain knows what was not checked.
+What you may not do is relay the report with the gap intact and move on.
+The crewmate did its job by naming the wall; an unclosed gap then turns silently into a weaker answer that reads exactly like a complete one.
+The same applies to a `blocked: no access to ...` wake: route the query or decide out loud that the work proceeds without it.
+
 Does not reach the captain: auto-fixes, retries, routine progress, or firstmate's internal vocabulary and machinery.
 Batch non-urgent updates into your next natural reply.
 Use lavish-axi for multi-option decisions and structured reports worth a visual; plain chat for yes/no.
@@ -686,6 +695,9 @@ For a ship task the definition of done is shaped by the project's delivery mode 
 The no-mistakes brief points to no-mistakes' version-matched guidance and keeps only firstmate-specific wrapper rules for `ask-user` escalation, `--yes` avoidance, and the CI-green done line.
 The scaffold reads the mode via `fm-project-mode.sh`, so you do not pass it.
 Ship briefs also include the project-memory contract: run `bin/fm-ensure-agents-md.sh` when the project already has agent-memory files or when the task produced durable project-intrinsic knowledge, then record proportionate learnings in `AGENTS.md`.
+Ship and scout briefs also carry an access-and-routing section and the matching access-wall rule: a crewmate probes a capability once, uses it if the probe answers, and escalates a failed probe as `blocked:` instead of downgrading its answer into a caveat.
+The scaffold appends this home's `data/access.md` under that section as the fleet access map, so the inventory stays local and current while the routing rule stays shared; it is a graceful no-op when the file is absent.
+Keep `data/access.md` accurate and mark firstmate-only capabilities explicitly: crew reach varies by harness and pane, so an inventory asserted rather than probed is the same stale-confidence failure the freshness rule guards against.
 For scout tasks add `--scout`: the scaffold swaps the definition of done for the report contract (findings to `data/<id>/report.md`, no branch, no push, no PR) and declares the worktree scratch; scout is mode-agnostic.
 Scout briefs do not include the project-memory step, because their deliverable is a report rather than a committed project change.
 For secondmates use `bin/fm-brief.sh <id> --secondmate <project>...`.

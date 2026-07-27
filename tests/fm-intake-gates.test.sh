@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Behavior tests for the two intake gates in fm-spawn.sh, plus their reporting
-# surfaces (bootstrap's CLOSED_TOPICS line, the brief's freshness section).
+# Behavior tests for the two enforced intake gates in fm-spawn.sh (--why, closed
+# topics), plus the two brief-carried conventions that ride with them (freshness
+# provenance, access routing) and bootstrap's CLOSED_TOPICS report.
 #
-# Both gates exist because the rules they encode were written down, loaded, and
+# All four exist because the rules they encode were written down, loaded, and
 # broken anyway. So these tests are written to exercise the REFUSAL, never merely
 # to observe that a gate did not fire: a gate that has only been seen staying
 # quiet has proved nothing at all. Every gate here is asserted on its non-zero
@@ -423,6 +424,70 @@ test_brief_freshness_section() {
   pass "gate 3: ship and scout briefs carry the freshness-provenance contract"
 }
 
+# --- gate 4: access routing -------------------------------------------------
+
+# Like gate 3 this is a convention carried in the brief, so what is asserted is
+# that it reaches every ship and scout crewmate: the probe-then-escalate order,
+# the access-wall rule that makes a wall a BLOCKER rather than a caveat, and the
+# local fleet map when one exists.
+#
+# The structural section must NOT claim crews cannot reach MCP. Measured from a
+# claude crewmate pane on 2026-07-27, Sentry and RevenueCat MCP both answered, so
+# a blanket "route everything through firstmate" would be a confident, specific,
+# wrong instruction - the very failure the freshness section warns about - and it
+# would push crews to escalate work they can simply do. That absence is asserted
+# alongside a positive control proving the assertion can fire at all.
+test_brief_access_section() {
+  local home brief kind
+  home=$(new_home brief-access)
+  for kind in ship scout; do
+    if [ "$kind" = scout ]; then
+      FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
+        FM_STATE_OVERRIDE="$home/state" "$BRIEF_SH" "access-$kind" alpha --scout >/dev/null 2>&1
+    else
+      FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
+        FM_STATE_OVERRIDE="$home/state" "$BRIEF_SH" "access-$kind" alpha >/dev/null 2>&1
+    fi
+    brief="$home/data/access-$kind/brief.md"
+    assert_grep "# Access and routing" "$brief" "$kind brief has no access section"
+    assert_grep "PROBE once" "$brief" "$kind brief omits the probe-first step"
+    assert_grep "Access walls are BLOCKERS, not caveats" "$brief" "$kind brief omits the access-wall rule"
+    assert_grep 'blocked: no access to' "$brief" "$kind brief does not give the blocker status line"
+    assert_grep "could not establish" "$brief" "$kind brief does not rule out the silent downgrade"
+    # Positive control for the absence assertion below: prove this grep style CAN
+    # find a phrase that is genuinely present in this very file.
+    assert_grep "firstmate-only" "$brief" "positive control failed: the access section is not being read at all"
+    assert_no_grep "crews have no MCP" "$brief" "$kind brief asserts a blanket MCP claim that is not true"
+  done
+  pass "gate 4: ship and scout briefs carry probe-then-escalate routing and the access-wall rule"
+}
+
+# The fleet inventory is local and captain-specific, so it is injected from
+# data/access.md at generation time rather than baked into this tracked script -
+# and its absence must not remove the structural section, which is the half that
+# always applies.
+test_brief_access_map_injection() {
+  local home brief
+  home=$(new_home brief-access-map)
+  printf -- '- Sentry: MCP-backed. reach: probe first.\n- App Store Connect: reach: firstmate-only.\n' \
+    > "$home/data/access.md"
+  FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
+    FM_STATE_OVERRIDE="$home/state" "$BRIEF_SH" access-map-m1 alpha >/dev/null 2>&1
+  brief="$home/data/access-map-m1/brief.md"
+  assert_grep "## Fleet access map" "$brief" "brief did not carry the fleet access map heading"
+  assert_grep "App Store Connect: reach: firstmate-only." "$brief" "brief did not inject the local access map"
+
+  # Absent map: structural section survives, map heading does not.
+  local bare
+  bare=$(new_home brief-access-bare)
+  FM_ROOT_OVERRIDE='' FM_HOME="$bare" FM_DATA_OVERRIDE="$bare/data" \
+    FM_STATE_OVERRIDE="$bare/state" "$BRIEF_SH" access-bare-m2 alpha >/dev/null 2>&1
+  brief="$bare/data/access-bare-m2/brief.md"
+  assert_grep "# Access and routing" "$brief" "structural access section vanished with no access.md"
+  assert_no_grep "## Fleet access map" "$brief" "empty fleet map heading was emitted with no access.md"
+  pass "gate 4: data/access.md is injected as the fleet map, and its absence keeps the routing rule"
+}
+
 # --- bootstrap reporting ----------------------------------------------------
 
 # Bootstrap's contract is that silence means all good, so the closed-topic report
@@ -481,4 +546,6 @@ test_closed_ignores_non_entries
 test_closed_absent_register
 test_meta_records_provenance
 test_brief_freshness_section
+test_brief_access_section
+test_brief_access_map_injection
 test_bootstrap_closed_report

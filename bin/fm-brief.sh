@@ -31,6 +31,10 @@
 # Ship and scout briefs also carry a required freshness-provenance section: any claim
 # about LIVE state must be tagged [fetched <source> <ISO-8601 timestamp>], and an
 # untagged live-state claim is reported as unverified rather than as fact.
+# They also carry an access-and-routing section (probe a capability once, then escalate
+# a failed probe rather than working around it) with this home's data/access.md fleet
+# map appended when present, plus the matching access-wall rule: an unreachable
+# capability is escalated as a blocker, never downgraded into a caveat in the report.
 # Every generated brief (ship, scout, and the secondmate charter) also has the
 # captain's "## Engineering conventions" section from data/captain.md injected near
 # the top, so the conventions reach every crewmate at spawn; it is a graceful no-op
@@ -106,6 +110,55 @@ Specificity is not freshness. A detailed, confident, internally consistent descr
 If you cannot fetch it, say so plainly and say what you would have needed. Do not reconstruct live state from memory, from a previous report, from a cached export, or from the repo, and then present it as current.
 EOF
 )
+# The per-fleet access map, injected under the structural access section below.
+# Kept in this home's data/access.md - LOCAL and gitignored, because which
+# connectors, credentials and consoles exist is captain-specific while the routing
+# rule is shared - and pulled at generation time so it never goes stale in a
+# tracked file. Graceful no-op when absent: the structural section still ships,
+# because the part that must always reach a crewmate is "probe, then escalate",
+# not the inventory.
+fleet_access_body() {
+  local access="$DATA/access.md"
+  [ -f "$access" ] || return 0
+  cat "$access"
+}
+# Access and routing, injected into every ship and scout brief.
+#
+# The failure: a crewmate needed Sentry, could not reach it from its own pane,
+# quietly downgraded its answer to "could not establish", and buried that in a
+# report. Firstmate could have answered it from its own session in one call. The
+# same had already happened with RevenueCat and nobody generalised it.
+#
+# What this section deliberately does NOT say is "crews have no MCP access".
+# Measured from a claude crewmate pane on 2026-07-27, Sentry and RevenueCat MCP
+# both answered live, so a blanket "route everything through firstmate" would be a
+# confident, specific, WRONG instruction of exactly the kind the freshness section
+# above warns about - and it would push crews to escalate work they can simply do.
+# Reach varies by harness and by pane, so the rule is probe-then-escalate: one
+# cheap read-only call settles it, and only a failed probe (or a capability the
+# fleet map marks firstmate-only) becomes a routing question.
+access_block_text() {
+  cat <<'EOF'
+
+# Access and routing (read this before you write "could not check")
+Your pane is not firstmate's session. Some capabilities are reachable from here and some are not, and which is which depends on the harness you were launched on and the pane you are in. Never assume either way, in either direction.
+
+Settle it in this order:
+1. PROBE once. Make the smallest read-only call the capability offers: list organizations, list projects, fetch a single row. One call is enough, and it costs less than a paragraph of hedging.
+2. If the probe answers, use it, and tag what you fetched per the freshness rule above.
+3. If the probe fails, or the fleet map below marks the capability firstmate-only, STOP and escalate it as a blocker (see the access-wall rule in Rules). Do not work around it, do not substitute a weaker source, and do not write the answer as if the missing piece were unavailable to everyone.
+
+Firstmate's own session holds the fleet's connectors and credentials and can usually answer a specific question in a single call. So an access wall is a routing problem with a fast fix, not a limit on what the answer can be. The one thing that makes it permanent is you absorbing it silently.
+EOF
+}
+ACCESS_BLOCK=$(access_block_text)
+ACCESS_BODY=$(fleet_access_body)
+if [ -n "$ACCESS_BODY" ]; then
+  ACCESS_BLOCK="$ACCESS_BLOCK
+
+## Fleet access map
+$ACCESS_BODY"
+fi
 CONV_BODY=$(captain_conventions_body)
 CONVENTIONS_BLOCK=""
 if [ -n "$CONV_BODY" ]; then
@@ -210,7 +263,14 @@ The report is the only thing that survives, so anything worth keeping must be in
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 6. If a decision belongs to a human (product choices, destructive actions),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
+7. Access walls are BLOCKERS, not caveats. The moment you cannot reach something the task
+   needs - a connector, a credential, a console, a dashboard, production data - append
+   \`blocked: no access to {what}, needed to {what you would do with it}\` and stop.
+   Never downgrade it into "could not establish", "unable to verify", or an assumption
+   carried quietly into the report. Firstmate can usually route the query in one call,
+   but only if you say so at the moment you hit the wall instead of writing around it.
 ${FRESHNESS_BLOCK}
+${ACCESS_BLOCK}
 
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
@@ -273,7 +333,14 @@ $RULE1
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 6. If a decision belongs to a human (product choices, destructive actions, ask-user findings),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
+7. Access walls are BLOCKERS, not caveats. The moment you cannot reach something the task
+   needs - a connector, a credential, a console, a dashboard, production data - append
+   \`blocked: no access to {what}, needed to {what you would do with it}\` and stop.
+   Never downgrade it into "could not establish", "unable to verify", or an assumption
+   carried quietly into the report. Firstmate can usually route the query in one call,
+   but only if you say so at the moment you hit the wall instead of writing around it.
 ${FRESHNESS_BLOCK}
+${ACCESS_BLOCK}
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
