@@ -66,7 +66,7 @@ run_spawn() {
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" TMUX="fake,1,0" \
     FM_FAKE_SES="$session" FM_NEWWIN_LOG="$newlog" FM_LISTWIN_LOG="$listlog" \
     PATH="$fakebin:$PATH" \
-    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" codex 2>&1
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" codex --why captain 2>&1
 }
 
 test_new_window_target_carries_trailing_colon() {

@@ -42,6 +42,9 @@ See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/star
   Each starts with a usage header comment; keep it accurate when you change behavior.
   Test scripts and helpers in `tests/` are plain bash too.
   `shellcheck bin/*.sh tests/*.sh` must pass, and CI enforces it.
+- CI also guards the shape of the tree: tracked files at the repo root are limited to a small allowlist, and every tracked path may use only `[A-Za-z0-9._/-]`.
+  Both jobs exist because a mis-quoted shell redirect once committed a junk-named duplicate of the test suite that every other job passed.
+  A deliberate new root file or unusual path name is a one-line change to the matching job in `.github/workflows/ci.yml`.
 - Changes to harness adapters (launch templates in `bin/fm-spawn.sh`, facts in `.agents/skills/harness-adapters/SKILL.md`) must be verified empirically against the real harness, never written from documentation alone.
 - In Markdown, put each full sentence on its own line.
 
@@ -74,6 +77,7 @@ tests/fm-bootstrap.test.sh                # bootstrap dependency, feature-probe,
 tests/fm-fleet-sync.test.sh               # project clone refresh: safe detached recovery, STUCK drift reports, benign skips, and bootstrap relay
 tests/fm-x-mode.test.sh                   # X-mode poll, inbox context round-trip, reply threading, dismiss, dry-run preview, and .env-presence activation tests
 tests/fm-tangle-guard.test.sh             # primary-checkout tangle detection and spawn/brief isolation tests
+tests/fm-intake-gates.test.sh             # spawn intake gates: --why refusal and tag vocabulary, closed-topic refusal with matching precision and positive controls, meta provenance, --secondmate exemption, brief freshness section, bootstrap closed-topic report
 tests/fm-spawn-batch.test.sh              # batch dispatch and FM_HOME project-path scoping tests
 tests/fm-spawn-model-pin.test.sh          # model-selection env strip on every launch path (ship, scout, secondmate, raw), FM_KEEP_MODEL_ENV opt-out, and the tmux session-inheritance mechanism in a private-socket server
 tests/fm-update.test.sh                   # fast-forward-only self-update, reread, nudge, dedup, and skip-safety tests

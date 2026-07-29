@@ -59,7 +59,7 @@ fi
 
 # 3. Returned pool-slot build artifacts (never a LIVE lease). Live leases = worktree=
 #    paths recorded in this home's state/*.meta.
-live_wts=" $(grep -ho 'worktree=[^ ]*' "$FM_HOME"/state/*.meta 2>/dev/null | cut -d= -f2 | tr '\n' ' ') "
+live_wts=" $(grep -ho '^worktree=[^ ]*' "$FM_HOME"/state/*.meta 2>/dev/null | cut -d= -f2 | tr '\n' ' ') "
 for pool in /Users/claude/.treehouse/*/; do
   for slot in "$pool"*/; do
     for repo in "$slot"*/; do
@@ -95,17 +95,17 @@ self_path="$(pwd -P 2>/dev/null || pwd)"
 for meta in "$FM_HOME"/state/*.meta; do
   [ -e "$meta" ] || continue
   id="$(basename "$meta" .meta)"
-  wt="$(grep -o 'worktree=[^ ]*' "$meta" | cut -d= -f2)"
-  [ -n "$wt" ] && [ -d "$wt" ] || continue
+  wt="$(grep -o '^worktree=[^ ]*' "$meta" | cut -d= -f2)"
+  if [ -z "$wt" ] || [ ! -d "$wt" ]; then continue; fi
 
   # (c) secondmate homes are persistent - never auto-teardown them here
-  grep -q 'kind=secondmate' "$meta" && continue
+  grep -qx 'kind=secondmate' "$meta" && continue
 
   # (a) SELF-EXCLUSION: never tear down the workspace we are running inside.
   case "$self_path/" in "$wt"/*) echo "  skip (self): $id"; continue;; esac
 
   # (b) LIVENESS: a recorded tmux window that still exists means a crew is working.
-  win="$(grep -o 'window=[^ ]*' "$meta" | cut -d= -f2)"
+  win="$(grep -o '^window=[^ ]*' "$meta" | cut -d= -f2)"
   if [ -n "$win" ] && tmux list-windows -a -F '#S:#W' 2>/dev/null | grep -qx "$win"; then
     echo "  skip (in use): $id"; continue
   fi
