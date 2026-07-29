@@ -40,7 +40,7 @@ How the reply lands depends on whether the work finishes during this turn:
 - **Work that completes now** (filing a backlog item, answering from fleet state) already has its outcome, so post **one** reply reporting what was done - exactly as before.
 - **Work that spawns a real, longer-running job** (dispatching a crewmate, a scout investigation, a ship task) cannot report an outcome yet, so it follows **acknowledge first -> act -> follow up on completion**:
   1. **Acknowledge first.** Post an immediate, public-safe reply that you have the captain's order and are on it (the normal answer endpoint, via `bin/fm-x-reply.sh`). This is the legitimate, work-backed version of "aye, will do": it is paired with actually starting the work in the same turn, never a promise left empty.
-  2. **Act.** Dispatch the work through the normal lifecycle right away.
+  2. **Act.** Dispatch the work through the normal lifecycle right away. Under owner-only routing the mention is the captain's own ask, so a spawn from it carries `--why captain` (AGENTS.md section 7); a mention that fits none of the three tags is backlog, not a dispatch.
   3. **Link it for the follow-up.** Associate the spawned task with this mention so the completion follow-up can be posted later: `bin/fm-x-link.sh <task-id> <request_id>` (records the request id and a timestamp in the task's state). Do this right after the task is spawned.
   4. **Follow up on completion.** When that task reaches a terminal state (shipped / reported / merged / failed), firstmate posts **one** follow-up reply - "done, here's the result" - within a 24h window, then the link clears. That post happens on the task's completion wake, driven by AGENTS.md section 14, not this turn.
 

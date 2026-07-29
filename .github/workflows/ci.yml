@@ -58,3 +58,36 @@ jobs:
             printf '%s\n' "$tracked"
             exit 1
           fi
+      # A stray file at the repo root is obvious once seen and invisible otherwise:
+      # the lint job globs bin/ and tests/, the test job globs tests/*.test.sh, and
+      # nothing else looks here. A mis-quoted shell redirect once committed an 82KB
+      # duplicate of the test suite named `rite_brief() {,+14p` and every job passed.
+      # New root files are rare and deliberate, so the allowlist is cheap to extend.
+      - name: Repo root must carry only its known files
+        run: |
+          set -eu
+          unexpected=$(git ls-files | grep -v / | grep -vxF -e .gitignore \
+            -e .no-mistakes.yaml -e .tasks.toml -e AGENTS.md -e CLAUDE.md \
+            -e CONTRIBUTING.md -e LICENSE -e README.md || true)
+          if [ -n "$unexpected" ]; then
+            echo "::error::Unexpected tracked files at the repo root:"
+            printf '%s\n' "$unexpected"
+            echo "Remove them, or add them to the allowlist in this job if they belong here."
+            exit 1
+          fi
+      # The allowlist above guards a LOCATION, but the accident it was written for is
+      # location-independent: a mis-quoted command turns its own text into a filename
+      # wherever the shell happened to be, so the same slip inside bin/ or tests/ would
+      # pass every job. This guards the MECHANISM anywhere in the tree. Every path this
+      # repo has ever tracked is plain kebab or snake case, so the safe set is tight on
+      # purpose; a deliberate new path outside it is a one-line change here.
+      - name: Tracked paths must carry only shell-safe characters
+        run: |
+          set -eu
+          hostile=$(git ls-files | grep -E '[^A-Za-z0-9._/-]' || true)
+          if [ -n "$hostile" ]; then
+            echo "::error::Tracked paths carry characters outside [A-Za-z0-9._/-]:"
+            printf '%s\n' "$hostile"
+            echo "These are usually shell mis-quote artifacts. Remove them, or widen the pattern in this job if the name is deliberate."
+            exit 1
+          fi
