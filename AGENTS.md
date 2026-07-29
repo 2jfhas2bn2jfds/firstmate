@@ -74,22 +74,19 @@ bin/                 helper scripts, committed; read each script's header before
 config/crew-harness  crewmate harness override; LOCAL, gitignored; absent or "default" = same as firstmate
 config/x-mode.env    generated X-mode watcher cadence; LOCAL, gitignored; source before arming watcher when present
 config/email-mode.env generated email-mode watcher cadence (60s); LOCAL, gitignored; source before arming watcher when present (section 15)
-config/primary-home  absolute path of the MAIN firstmate home whose data/closed.md and data/access.md this home reads; LOCAL, gitignored; present only in a secondmate home, written by fm-home-seed, rewritten on every --secondmate launch, and refreshed across every live secondmate home by bootstrap so an unmigrated or moved home converges silently instead of warning until it is relaunched. A pointer, never a copy, so a closure cannot silently expire in a stale duplicate; when it cannot be resolved, ship/scout spawns and brief generation from that home warn loudly and bootstrap prints CLOSED_TOPICS_UNRESOLVED (sections 3 and 7)
 config/git-author    captain's GitHub identity for agent commits (name=<username>, email=<id>+<username>@users.noreply.github.com); LOCAL, gitignored; read by fm-spawn (per worktree/home) and fm-bootstrap (primary) so commits attribute to one account and GitHub suggests no Co-authored-by trailer; absent = no-op
 data/                personal fleet records; LOCAL, gitignored as a whole
   backlog.md         task queue, dependencies, history
   captain.md         captain's curated personal preferences and working style; LOCAL, gitignored, and canonical even if harness memory mirrors it
   projects.md        thin fleet navigation registry; firstmate-private, parsed by fm-project-mode.sh (section 6)
   secondmates.md      secondmate routing table; firstmate-private, maintained by fm-home-seed.sh (section 6)
-  access.md          fleet access map: what access exists, where it lives, and how a crew reaches it (marking firstmate-only capabilities); LOCAL, gitignored, injected into every ship and scout brief by fm-brief.sh (section 11). Fleet-wide: kept in the MAIN home, read by secondmate homes through config/primary-home
-  closed.md          topics the captain has closed; LOCAL, gitignored (closures are captain-specific, the mechanism is shared). fm-spawn refuses any ship/scout spawn matching one (section 7); bootstrap reports the count and slugs, and names any malformed line that closes nothing (section 3). Fleet-wide: kept in the MAIN home, read by secondmate homes through config/primary-home, never copied into them
   <id>/brief.md      per-task crewmate brief, or per-secondmate charter brief when kind=secondmate
   <id>/report.md     scout task deliverable, written by the crewmate; survives teardown
 projects/            cloned repos; gitignored; READ-ONLY for you
 state/               volatile runtime signals; gitignored
   <id>.status        appended by crewmates: "<state>: <note>" wake-event lines, not current-state truth
   <id>.turn-ended    touched by turn-end hooks
-  <id>.meta          written by fm-spawn: window=, worktree=, project=, harness=, kind=, mode=, yolo=; ship/scout also record why= (the intake tag and note, section 7), reopened_closed= when a closure was explicitly overridden, and allowed_unfilled_task= when the unfilled-brief check was waived; kind=secondmate also records home= and projects= (fm-pr-check appends pr= and verified pr_head= when available; fm-x-link appends x_request= and x_request_ts= for an X-mention-originated task, section 14)
+  <id>.meta          written by fm-spawn: window=, worktree=, project=, harness=, kind=, mode=, yolo=; kind=secondmate also records home= and projects= (fm-pr-check appends pr= and verified pr_head= when available; fm-x-link appends x_request= and x_request_ts= for an X-mention-originated task, section 14)
   <id>.check.sh      optional slow poll you write per task (e.g. merged-PR check)
   x-watch.check.sh   generated X-mode relay poll shim; present only when opted in (section 14)
   x-inbox/           generated X-mode pending mention payloads; fmx-respond drains it (section 14)
@@ -126,7 +123,6 @@ Bootstrap also sweeps every live secondmate home, fast-forwarding each one's wor
 This is a purely local fast-forward (every secondmate home is a worktree of this same repo, sharing one object store), never a fetch from origin and never a surprise pull: the version followed is simply whatever the primary is currently on, which only the captain changes deliberately via `git pull` or `/updatefirstmate`.
 A tracked-files fast-forward never touches the gitignored operational dirs, so a secondmate's backlog, projects, and in-flight work are never disturbed; a dirty, diverged, or in-flight home is skipped untouched.
 The sweep reports the `NUDGE_SECONDMATES:` line below only when a running secondmate actually advanced with an instruction change, so firstmate knows which ones to live-converge.
-The same sweep also refreshes each home's `config/primary-home` pointer so the fleet's one closed-topic register and access map stay reachable from it; that is a gitignored `config/` file, so it never disturbs the fast-forward, and it is silent because an unmigrated home is not a broken one.
 Silence means all good: say nothing and move on.
 Otherwise it prints one line per problem or capability fact; handle each:
 
@@ -140,10 +136,6 @@ Otherwise it prints one line per problem or capability fact; handle each:
 - `FLEET_SYNC: <repo>: recovered: <detail>` - the clone had drifted onto a clean detached HEAD holding no unique commits and the sync self-healed it (re-attached the default branch and fast-forwarded); no action needed, it is reported only so the self-heal is visible.
 - `FLEET_SYNC: <repo>: STUCK: on <state>, N commits behind <base> - needs attention` - the clone is dirty, on a non-default branch, detached with unique commits, or diverged, so the sync left it untouched (never forcing or discarding); it will keep falling behind until you look. A loud STUCK, especially a growing N across bootstraps, means that clone needs hands-on attention; dispatch a crewmate or resolve it before it strands work.
 - `SECONDMATE_SYNC: secondmate <id>: skipped: <reason>` - the local-HEAD secondmate sync left a live secondmate home on its existing checkout because the home was dirty, diverged, unsafe, on the wrong branch, missing the primary target commit, or otherwise not fast-forwardable; bootstrap continued, but inspect the reason because the secondmate may be stale after a primary update.
-- `CLOSED_TOPICS: <n> closed at intake: <slugs>` - the topics the captain has closed, listed so they are visible before any dispatch decision; `fm-spawn.sh` refuses a ship or scout spawn that matches one (section 7). Not a problem to fix: record it and do not reopen any of them without the captain's explicit word.
-- `CLOSED_TOPICS_MALFORMED: closes nothing, fix or remove: <line>` - a `data/closed.md` bullet that is not a well-formed entry (a missing second `:`, an empty slug, no keyword that survives normalization, or an indented bullet), so it closes nothing while looking like a closure. This IS a problem to fix: repair the line to `- <slug>: <comma-separated keywords>: <one-line why> (closed <date>)`, or delete it, and confirm with the captain what that topic's closure should be.
-- `CLOSED_TOPICS_UNRESOLVED: <reason>` - printed only in a secondmate home, and only when it cannot reach the main firstmate home's `data/closed.md` through its `config/primary-home` pointer. The closed-topic gate is BROKEN here, not empty: this home will dispatch work on topics the captain closed and nothing else will say so. A pointer naming something that is not a main firstmate home (the secondmate marker present, or `AGENTS.md`, `bin/` or `data/` missing) is one of these reasons, not a resolution, because it would otherwise resolve to a register file that does not exist and read as "no closures set". Fix the pointer (record the main home's absolute path, or have the main firstmate relaunch this secondmate, which rewrites it; a live secondmate also picks one up at the main home's next bootstrap) before dispatching.
-- `CLOSED_TOPICS_LOCAL_IGNORED: <path> is IGNORED ...` - printed only in a secondmate home, when that home holds a `data/closed.md` of its own. Nothing reads it, so it is a closure the captain believes is set and that does not exist. Move those lines into the main firstmate home's register; do not delete the local file without checking what is in it, and do not expect this home to honour it.
 - `TASKS_AXI: available` - an optional capability fact, not a problem; record it silently and use section 10 for backlog mutations.
   It prints only after the `tasks-axi` compatibility probe passes for version 0.1.1 or newer; absence or incompatibility only falls back to hand-editing and never blocks work.
 - `NUDGE_SECONDMATES: <window-targets...>` - the secondmate sweep fast-forwarded one or more *running* secondmate homes to firstmate's current version and their instructions actually changed; for each listed window, send a one-line re-read nudge with `bin/fm-send.sh <window-target> 'firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions.'` so that secondmate picks up its new instructions.
@@ -352,37 +344,15 @@ Write the brief per section 11.
 Load `harness-adapters` before spawning or recovering any direct report so trust dialogs, verified adapters, and harness-specific behavior are handled correctly.
 
 ```sh
-bin/fm-spawn.sh <id> projects/<repo> --why captain            # uses the active crewmate harness
-bin/fm-spawn.sh <id> projects/<repo> --why blocks:<what> codex   # per-task harness override
-bin/fm-spawn.sh <id> projects/<repo> --why captain --scout    # scout task; records kind=scout in meta
+bin/fm-spawn.sh <id> projects/<repo>             # uses the active crewmate harness
+bin/fm-spawn.sh <id> projects/<repo> codex       # per-task harness override
+bin/fm-spawn.sh <id> projects/<repo> --scout     # scout task; records kind=scout in meta
 bin/fm-spawn.sh <id> --secondmate                 # launch a registered persistent secondmate in its home
 bin/fm-spawn.sh <id> <firstmate-home> --secondmate   # launch or recover an explicit secondmate home
-bin/fm-spawn.sh <id1>=projects/<repo1> <id2>=projects/<repo2> --why captain [--scout]   # batch: one call, several tasks
+bin/fm-spawn.sh <id1>=projects/<repo1> <id2>=projects/<repo2> [--scout]   # batch: one call, several tasks
 ```
 
-**Every ship and scout spawn must declare `--why <tag>[:<note>]`, and the script refuses without it.**
-There are exactly three tags: `captain` (the captain asked for this), `blocks:<what>` (it blocks something the captain asked for, naming what), and `incident` (a live production incident affecting users right now).
-There is no tag for "interesting", "worth doing", "found while looking at X", or "tidy-up", because those are not reasons to spend the captain's attention; work that fits none of the three tags goes in the backlog for the captain to choose, or nowhere.
-The tag and note are recorded as `why=` in the task's meta.
-`--secondmate` is exempt: launching a persistent supervisor is lifecycle, not work.
-
-**A closed topic refuses at the spawn call.**
-The script matches the task id and the brief, minus the boilerplate `fm-brief.sh` injects into every brief, against `data/closed.md` and refuses, printing the closure line, when they hit; `--reopen-closed` proceeds and records `reopened_closed=<slug>` in meta, and is only for a reopen the captain explicitly authorised.
-The injected conventions, setup, rules, freshness, access, fleet-map, project-memory and definition-of-done blocks are stripped, so a keyword landing in them cannot refuse every dispatch in the fleet.
-A region is dropped only when the explicit `fm:boilerplate` markers wrap it AND it opens with a section the scaffold generates, because either signal alone drops task content: heading text alone stops matching at a task body quoting `# Setup`, and markers alone drop a task body quoting the marker pair.
-Everything else stays matched, and every uncertain case (no markers, unbalanced markers, or a marked region opening with something unrecognised) is kept loudly, so the narrowing widens the haystack rather than silently shrinking it; the one narrowing that survives in a task body is where both signals still agree, a body pasting a complete injected block verbatim.
-`FM_CLOSED_EXPLAIN=1` prints the exact haystack a spawn matched, how many marked regions it stripped, and how many it kept as unrecognisable.
-The register is fleet-wide and lives in the MAIN firstmate home, because most crews are dispatched by secondmates and a per-home register would leave the gate enforced where work is not started and inert where it is; a secondmate home reads that one file through the `config/primary-home` pointer it records at seed time, on every launch, and at every bootstrap sweep of the live homes, and keeps no copy of its own, since a stale copy is a closure that silently expires.
-A secondmate home that cannot resolve that pointer has a broken control rather than an empty one, so every ship and scout spawn from it warns loudly on stderr and its bootstrap prints `CLOSED_TOPICS_UNRESOLVED:`; it warns and proceeds rather than refusing, because failing closed on every dispatch from that home is its own outage.
-The pointer resolves only to a real main firstmate home, never to any directory that merely exists, because a target with no register file would read as "no closures set" and take the gate quietly inert.
-A closure line written into a secondmate home's own `data/closed.md` is never read, so that file is reported too, on every ship and scout spawn from that home and as bootstrap's `CLOSED_TOPICS_LOCAL_IGNORED:`; move the line into the main home's register rather than expecting this home to honour it.
-A ship or scout spawn also refuses (exit 4) while its brief still carries the scaffold's `{TASK}` placeholder on a line of its own: an unfilled brief leaves the closure check nothing to match, so fill the brief before spawning. In a generated brief, which always carries a `# Task` heading, the scan starts at that heading and tracks fences from there, so a task body that mentions the placeholder in prose, or demonstrates the scaffold's shape inside a fence below it, spawns normally, because the task body is free text and a brief about the brief scaffold does both. A brief with no `# Task` heading at all gets no fence tracking, because nothing says where a fence opened, so any standalone placeholder in it refuses regardless of fences. `--allow-unfilled-task` waives the check, warns loudly, and records `allowed_unfilled_task=1` in meta; like `--reopen-closed` it is a per-task waiver, so batch dispatch refuses it.
-Add a closure line when the captain closes a topic: `- <slug>: <comma-separated keywords>: <one-line why> (closed <date>)`, with specific multi-word keywords (a bare generic word blocks unrelated work).
-A bullet is a `-` followed by any whitespace, tab included, matching what markdown renders as a list item, so every line that looks like a closure either closes something or is named out loud.
-A bullet that is not a well-formed entry closes nothing and is warned about rather than skipped, on stderr at the spawn call and as a `CLOSED_TOPICS_MALFORMED:` line at bootstrap; that includes an entry with no usable keyword (`- topic:: why`) and an indented bullet, which look like closures and match nothing. Fix or remove the line, because until then the captain believes that topic is closed and it is not.
-
-Dispatch several tasks in one call by passing `id=repo` pairs instead of a single `<id> <project>`; each pair is spawned through the same single-task path, a shared `--scout` and a shared `--why` apply to all, and the looping happens inside the script so you never hand-write a multi-task shell loop.
-Batch dispatch refuses `--reopen-closed`: a reopen is a per-task authorisation, so spawn that one task on its own and batch the rest.
+Dispatch several tasks in one call by passing `id=repo` pairs instead of a single `<id> <project>`; each pair is spawned through the same single-task path, a shared `--scout` applies to all, and the looping happens inside the script so you never hand-write a multi-task shell loop.
 If one pair fails, the rest still run and the batch exits non-zero.
 
 The script resolves the harness (`fm-harness.sh crew`), owns the verified launch templates, resolves the project's delivery mode (`fm-project-mode.sh`) for ship/scout tasks, and records `harness=`, `kind=`, `mode=`, and `yolo=` in the task's meta; a non-flag third argument containing whitespace is treated as a raw launch command (only for verifying new adapters).
@@ -640,20 +610,6 @@ Reaches the captain immediately:
 - Anything destructive, irreversible, or security-sensitive.
 - A needed credential or login.
 
-**An untagged live-state claim is not relayed to the captain as fact.**
-A claim about live state - a store listing, the running app, production data, deployed config, a dashboard, third-party console settings - is relayed as fact only when it carries `[fetched <source> <ISO-8601 timestamp>]` from the crewmate that fetched it, or when you fetched it yourself in this session.
-Otherwise it is relayed as "not checked", and that "not checked" travels with the claim through every restatement.
-Specificity is not freshness: a detailed, confident, internally consistent description of a live artefact reads identically whether it is current or months stale, so neither the detail nor your confidence in it is evidence of recency.
-This is a loud rule, not an enforced one - nothing in the machinery can tell a fresh claim from a stale one - so it holds only if you apply it every time.
-
-**An unclosed gap in a crew's report is closed or explicitly dropped, never left sitting.**
-When a crewmate reports that it could not reach something - a connector, a credential, a console, production data - that gap becomes yours the moment you read it, because your own session holds the fleet's connectors and credentials and a crewmate's pane may not.
-Close it: run the query yourself, which is usually one call, and fold the answer into what you relay.
-Or drop it explicitly: tell the captain the answer stands without that piece and what it costs, so the captain knows what was not checked.
-What you may not do is relay the report with the gap intact and move on.
-The crewmate did its job by naming the wall; an unclosed gap then turns silently into a weaker answer that reads exactly like a complete one.
-The same applies to a `blocked: no access to ...` wake: route the query or decide out loud that the work proceeds without it.
-
 Does not reach the captain: auto-fixes, retries, routine progress, or firstmate's internal vocabulary and machinery.
 Batch non-urgent updates into your next natural reply.
 Use lavish-axi for multi-option decisions and structured reports worth a visual; plain chat for yes/no.
@@ -712,12 +668,6 @@ For a ship task the definition of done is shaped by the project's delivery mode 
 The no-mistakes brief points to no-mistakes' version-matched guidance and keeps only firstmate-specific wrapper rules for `ask-user` escalation, `--yes` avoidance, and the CI-green done line.
 The scaffold reads the mode via `fm-project-mode.sh`, so you do not pass it.
 Ship briefs also include the project-memory contract: run `bin/fm-ensure-agents-md.sh` when the project already has agent-memory files or when the task produced durable project-intrinsic knowledge, then record proportionate learnings in `AGENTS.md`.
-Ship and scout briefs also carry a freshness-provenance section: any claim the crewmate makes about live state must be tagged `[fetched <source> <ISO-8601 timestamp>]`, and an untagged live-state claim is written as unverified rather than as fact, which is the crew-side half of the relay rule in section 9.
-Ship and scout briefs also carry an access-and-routing section and the matching access-wall rule: a crewmate probes a capability once, uses it if the probe answers, and escalates a failed probe as `blocked:` instead of downgrading its answer into a caveat.
-The scaffold appends the fleet's `data/access.md` under that section as the fleet access map, so the inventory stays local and current while the routing rule stays shared; it is a graceful no-op when the file is absent.
-The map is fleet-wide like the closed-topic register: it lives in the MAIN firstmate home, and a secondmate home reads it through the same `config/primary-home` pointer, so the crews a secondmate spawns get the captain's map rather than an empty inventory; an unresolvable pointer warns loudly instead of quietly generating a brief with no map.
-Keep `data/access.md` accurate and mark firstmate-only capabilities explicitly: crew reach varies by harness and pane, so an inventory asserted rather than probed is the same stale-confidence failure the freshness rule guards against.
-Every block the scaffold injects into a ship or scout brief is wrapped in `<!-- fm:boilerplate start -->` / `<!-- fm:boilerplate end -->` markers, which together with the generated section heading each block opens is how the closed-topic gate tells generated text from the task you wrote (section 7); leave both in place, and put the task description where the `{TASK}` placeholder sits rather than inside a marked region.
 For scout tasks add `--scout`: the scaffold swaps the definition of done for the report contract (findings to `data/<id>/report.md`, no branch, no push, no PR) and declares the worktree scratch; scout is mode-agnostic.
 Scout briefs do not include the project-memory step, because their deliverable is a report rather than a committed project change.
 For secondmates use `bin/fm-brief.sh <id> --secondmate <project>...`.
@@ -728,7 +678,7 @@ Keep the charter focused on persistent responsibility, available project clones,
 Preserve the requests-from-main-firstmate contract in the charter: marked requests return via status or a doc pointer, while unmarked direct captain messages stay conversational.
 Before seeding, loading, handing backlog to, or launching a secondmate home, load `secondmate-provisioning`.
 The status-reporting protocol is intentionally sparse: crewmates append status only for supervisor-actionable phase changes or `needs-decision`/`blocked`/`done`/`failed`, because every append wakes firstmate.
-For any generated brief that still contains `{TASK}`, replace it with a clear task description, acceptance criteria, and any constraints or context the crewmate needs before spawning or seeding; a ship or scout spawn refuses while the placeholder is still there (section 7).
+For any generated brief that still contains `{TASK}`, replace it with a clear task description, acceptance criteria, and any constraints or context the crewmate needs before spawning or seeding.
 Adjust the other sections only when the task genuinely deviates from the standard ship-a-new-PR shape (e.g. fixing an existing external PR); the scaffold is the contract, not a suggestion.
 
 ## 12. Self-update

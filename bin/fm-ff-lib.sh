@@ -19,14 +19,7 @@
 # default branch, so the fast-forward advances HEAD only and never moves the
 # shared default branch or any other worktree's checkout.
 
-# The secondmate marker has ONE definition, in bin/fm-fleet-home-lib.sh, sourced
-# here rather than re-spelled: the fleet-register redirection keys on this name, so
-# a rename that missed a copy would split "is this a secondmate home?" between call
-# sites with no symptom. The `:-` keeps a caller that set it before sourcing (the
-# spawn path does) authoritative.
-# shellcheck source=bin/fm-fleet-home-lib.sh
-. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-fleet-home-lib.sh"
-SUB_HOME_MARKER="${SUB_HOME_MARKER:-$FM_SECONDMATE_HOME_MARKER}"
+SUB_HOME_MARKER="${SUB_HOME_MARKER:-.fm-secondmate-home}"
 
 # --- helpers ---------------------------------------------------------------
 

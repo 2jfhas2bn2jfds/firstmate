@@ -24,13 +24,6 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 REG="$DATA/secondmates.md"
 MAIN_BACKLOG="$DATA/backlog.md"
-# shellcheck source=bin/fm-fleet-home-lib.sh
-. "$SCRIPT_DIR/fm-fleet-home-lib.sh"
-# One definition of the secondmate marker, sourced above: destination validation
-# below and the fleet-register redirection key on the same name, so a rename that
-# missed a copy would split "is this a secondmate home?" between call sites with no
-# symptom.
-SUB_HOME_MARKER="$FM_SECONDMATE_HOME_MARKER"
 
 [ $# -ge 2 ] || { echo "usage: fm-backlog-handoff.sh <secondmate-id> <item-key>..." >&2; exit 1; }
 ID=$1
@@ -126,11 +119,11 @@ validate_secondmate_home() {
     return 1
   fi
   validate_operational_dirs "$abs_home" "$abs_active_home" "$abs_root" || return 1
-  if [ ! -f "$abs_home/$SUB_HOME_MARKER" ]; then
+  if [ ! -f "$abs_home/.fm-secondmate-home" ]; then
     echo "error: firstmate home $home is not a seeded secondmate home" >&2
     return 1
   fi
-  marker_id=$(cat "$abs_home/$SUB_HOME_MARKER" 2>/dev/null || true)
+  marker_id=$(cat "$abs_home/.fm-secondmate-home" 2>/dev/null || true)
   if [ "$marker_id" != "$id" ]; then
     echo "error: firstmate home $home is marked for secondmate ${marker_id:-unknown}, expected $id" >&2
     return 1

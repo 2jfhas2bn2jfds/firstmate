@@ -134,14 +134,14 @@ test_launch_command_strips_pin_on_every_path() {
     mkdir -p "$home/data/task-$kind"
     printf 'brief\n' > "$home/data/task-$kind/brief.md"
     case "$kind" in
-      ship)  out=$(FM_FAKE_PANE_PATH="$wt" run_spawn "$home" "$log" "$fakebin" "task-$kind" "$proj" codex --why captain) ;;
-      scout) out=$(FM_FAKE_PANE_PATH="$wt" run_spawn "$home" "$log" "$fakebin" "task-$kind" "$proj" codex --scout --why captain) ;;
+      ship)  out=$(FM_FAKE_PANE_PATH="$wt" run_spawn "$home" "$log" "$fakebin" "task-$kind" "$proj" codex) ;;
+      scout) out=$(FM_FAKE_PANE_PATH="$wt" run_spawn "$home" "$log" "$fakebin" "task-$kind" "$proj" codex --scout) ;;
       secondmate)
         mkdir -p "$home/data/domain-z9"
         printf 'charter\n' > "$home/data/domain-z9/brief.md"
         out=$(run_spawn "$home" "$log" "$fakebin" domain-z9 "$subhome" codex --secondmate)
         ;;
-      raw)   out=$(FM_FAKE_PANE_PATH="$wt" run_spawn "$home" "$log" "$fakebin" "task-$kind" "$proj" 'mytool --flag' --why captain) ;;
+      raw)   out=$(FM_FAKE_PANE_PATH="$wt" run_spawn "$home" "$log" "$fakebin" "task-$kind" "$proj" 'mytool --flag') ;;
     esac
     status=$?
     expect_code 0 "$status" "$kind spawn should succeed"
@@ -180,7 +180,7 @@ test_launch_command_strips_pin_on_every_path() {
   log="$TMP_ROOT/sendkeys-optout.log"
   : > "$log"
   out=$(FM_KEEP_MODEL_ENV=1 FM_FAKE_PANE_PATH="$wt" \
-    run_spawn "$home" "$log" "$fakebin" task-ship "$proj" codex --why captain)
+    run_spawn "$home" "$log" "$fakebin" task-ship "$proj" codex)
   status=$?
   expect_code 0 "$status" "opt-out spawn should succeed"
   assert_contains "$out" "spawned " "opt-out spawn did not report success"

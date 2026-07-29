@@ -1,49 +1,8 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse worktree, or a secondmate in
 # its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --why <tag>[:<note>] [harness|launch-command] [--scout]
-#        [--reopen-closed] [--allow-unfilled-task]
+# Usage: fm-spawn.sh <task-id> <project-dir> [harness|launch-command] [--scout]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [harness|launch-command] --secondmate
-#   INTAKE GATE 1 - self-initiated work defaults to OFF. Every ship and scout spawn
-#   REFUSES unless --why declares why the work exists, with one of exactly three tags:
-#   captain (the captain asked), blocks (it blocks something the captain asked for),
-#   incident (a live production incident affecting users now). Recorded as why= in the
-#   task's meta. "Interesting", "worth doing", "found while looking at X" and "tidy-up"
-#   are not reasons to start work, and there is no tag for them. --secondmate is exempt:
-#   launching a persistent supervisor is lifecycle, not work.
-#   INTAKE GATE 2a - a ship or scout spawn also REFUSES (exit 4) when its brief still
-#   carries the scaffold's unreplaced {TASK} placeholder on a line of its own: the brief was
-#   never filled in, and an empty task body would leave gate 2 below with nothing to match.
-#   The scan starts at the brief's own "# Task" heading with fence state reset, so a fence
-#   left hanging open in the injected conventions above it cannot hide the placeholder, and
-#   a generated brief (which always carries that heading) is unaffected by a task body that
-#   mentions the placeholder in prose or demonstrates the scaffold's shape inside a fence.
-#   A brief with NO task heading gets no fence tracking at all, so any standalone
-#   placeholder in it refuses regardless of fences; where the fence state is ambiguous the
-#   brief is likewise treated as UNFILLED, the loud direction, since this check has a
-#   waiver and a missed unfilled brief also empties gate 2.
-#   --allow-unfilled-task proceeds anyway, records allowed_unfilled_task=1 in meta, and
-#   prints a loud warning; like --reopen-closed it is a per-task waiver, so batch dispatch
-#   REFUSES it (exit 2) rather than waiving the check for every pair.
-#   INTAKE GATE 2 - closed topics refuse at intake. The task id and the brief minus the
-#   regions fm-brief.sh both marked as boilerplate and opened with a generated heading are
-#   matched against the fleet's data/closed.md (see bin/fm-closed-lib.sh for the register
-#   format and the exact matching rule); a match REFUSES and prints the closure line
-#   verbatim. The register is fleet-wide and lives in the MAIN firstmate home: a secondmate
-#   home reads that one register through the main-home pointer it records at seed time and
-#   on every --secondmate launch (bin/fm-fleet-home-lib.sh), never a copy of its own. A
-#   secondmate home that cannot resolve it - including a pointer naming something that is
-#   not a main firstmate home - has a broken control, not an empty one, so every ship and
-#   scout spawn from it WARNS loudly on stderr and proceeds; so does a secondmate home
-#   holding its own data/closed.md, which is never read. A register
-#   bullet that is not a well-formed entry (no second ':', empty slug, or no usable keyword)
-#   closes nothing, and is warned about on stderr rather than skipped silently.
-#   FM_CLOSED_EXPLAIN=1 prints the exact haystack the gate matched, how many marked regions
-#   were stripped from it, and how many were kept because they were not recognisable.
-#   --reopen-closed proceeds anyway, records reopened_closed=<slug> in meta, and prints a
-#   loud warning; it exists so the captain can authorise a reopen deliberately. It is a
-#   per-task authorisation, so batch dispatch REFUSES it (exit 2) rather than widening one
-#   reopen into a blanket bypass for every pair.
 #   With no harness arg, the harness comes from fm-harness.sh crew (config/crew-harness,
 #   falling back to firstmate's own harness). A bare adapter name (claude|codex|
 #   opencode|pi) overrides it for this spawn. A non-flag string containing whitespace
@@ -52,9 +11,7 @@
 #   see AGENTS.md task lifecycle); --secondmate records kind=secondmate and launches in a
 #   provisioned firstmate home; the default is kind=ship.
 #   Before a secondmate launch, the home is locally fast-forwarded to the primary
-#   default-branch commit when safe; skipped syncs warn and launch unchanged. The launch
-#   also rewrites that home's config/primary-home pointer, so the fleet's one closed-topic
-#   register and access map stay reachable from it.
+#   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch after treehouse get unless the resolved pane
 #   path is a real git worktree root distinct from the primary project checkout.
 #   When config/git-author is present, the launch target (worktree or secondmate home)
@@ -62,9 +19,9 @@
 #   one GitHub account; a conflicting explicitly-set identity field is preserved and
 #   reported to stderr (see bin/fm-git-author-lib.sh).
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
-#     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar --why captain:asked [--scout]
+#     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
-#   source of truth; a shared --scout and a shared --why apply to every pair. The loop lives here, in bash,
+#   source of truth; a shared --scout applies to every pair. The loop lives here, in bash,
 #   so callers never hand-write a multi-task shell loop (the tool shell is zsh, which does
 #   not word-split unquoted $vars and silently breaks ad-hoc `for ... in $pairs` loops).
 #   Launch templates live in launch_template() below; placeholders replaced before launch:
@@ -92,116 +49,23 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
-# shellcheck source=bin/fm-fleet-home-lib.sh
-. "$SCRIPT_DIR/fm-fleet-home-lib.sh"
-# One definition of the secondmate marker, sourced above and taken here before the
-# libraries that read it: the whole fleet-register redirection keys on this name, so
-# a rename that missed a copy would split "is this a secondmate home?" between call
-# sites with no symptom.
-SUB_HOME_MARKER="$FM_SECONDMATE_HOME_MARKER"
+SUB_HOME_MARKER=".fm-secondmate-home"
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 # shellcheck source=bin/fm-git-author-lib.sh
 . "$SCRIPT_DIR/fm-git-author-lib.sh"
-# shellcheck source=bin/fm-closed-lib.sh
-. "$SCRIPT_DIR/fm-closed-lib.sh"
-# The closed-topic register is fleet-wide and lives in the MAIN firstmate home.
-# Most crews here are dispatched by secondmates, so a per-home register would have
-# left gate 2 enforced where work is not started and inert everywhere it is; a
-# secondmate home reads the one register through its recorded pointer instead of
-# keeping a copy that would silently drift out of date. A pointer that cannot be
-# resolved is a BROKEN control rather than an empty one, so gate 2 below warns
-# loudly about it on every ship and scout spawn instead of passing quietly.
-CLOSED_UNRESOLVED=
-if ! CLOSED=$(fm_fleet_register "$FM_HOME" "$DATA" closed.md); then
-  CLOSED_UNRESOLVED=$CLOSED
-  CLOSED=
-fi
-# A closure written into a secondmate home's own data/closed.md is never read. It is
-# the easiest mistake to make here (AGENTS.md says to add a closure line without
-# naming a home) and the quietest to live with, so it is named rather than skipped.
-CLOSED_SHADOW=$(fm_fleet_shadow_register "$FM_HOME" "$DATA" closed.md)
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
 KIND=ship
-WHY=
-REOPEN_CLOSED=
-ALLOW_UNFILLED_TASK=
 POS=()
-
-# INTAKE GATE 1: self-initiated work defaults to OFF.
-#
-# The rule "do not start work the captain did not ask for" was written down, loaded,
-# and broken anyway - on 2026-07-27 roughly two of six crews were on requested work,
-# and the rest came from alerts, anomalies and crew observations that read as
-# interesting. Prose did not hold. A non-zero exit does, so the declaration of WHY the
-# work exists is now an argument the caller cannot omit, and the tag vocabulary has no
-# slot for "interesting". Three tags, and only three: if the work fits none of them, it
-# does not start.
-why_refusal() {
-  local reason=$1
-  cat >&2 <<'EOF'
-error: refusing to spawn - work must declare why it exists.
-
-  --why captain[:<note>]    the captain asked for this
-  --why blocks:<what>       it blocks something the captain asked for (name what)
-  --why incident[:<note>]   a live production incident affecting users right now
-
-Those are the only three reasons to start work. "Interesting", "worth doing",
-"found while looking at X", "we may as well" and "tidy-up" are NOT reasons, and
-there is deliberately no tag for them: work with no captain behind it costs the
-captain attention they did not agree to spend. If the work fits none of the three
-tags, it does not start - queue it in the backlog and let the captain choose.
-EOF
-  printf 'reason: %s\n' "$reason" >&2
-}
-
-while [ $# -gt 0 ]; do
-  case "$1" in
+for a in "$@"; do
+  case "$a" in
     --scout) KIND=scout ;;
     --secondmate) KIND=secondmate ;;
-    --reopen-closed) REOPEN_CLOSED=1 ;;
-    --allow-unfilled-task) ALLOW_UNFILLED_TASK=1 ;;
-    --why)
-      if [ $# -lt 2 ]; then
-        why_refusal "--why was given with no value"
-        exit 2
-      fi
-      WHY=$2
-      shift
-      ;;
-    --why=*) WHY=${1#--why=} ;;
-    *) POS+=("$1") ;;
+    *) POS+=("$a") ;;
   esac
-  shift
 done
-
-# Validate --why here, before the batch split, so a bad batch fails whole rather than
-# per pair; the re-exec below forwards the validated value so each pair records it.
-WHY_TAG=
-WHY_NOTE=
-if [ "$KIND" != secondmate ]; then
-  case "$WHY" in
-    *:*) WHY_TAG=${WHY%%:*}; WHY_NOTE=${WHY#*:} ;;
-    *) WHY_TAG=$WHY; WHY_NOTE= ;;
-  esac
-  WHY_TAG=$(printf '%s' "$WHY_TAG" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
-  # Collapse the note to a single line: meta is a key=value file, so an embedded
-  # newline would forge a meta key.
-  WHY_NOTE=$(printf '%s' "$WHY_NOTE" | tr '\n\r' '  ' | sed 's/^ *//; s/ *$//')
-  case "$WHY_TAG" in
-    captain|blocks|incident) : ;;
-    '') why_refusal "no --why was given"; exit 2 ;;
-    *) why_refusal "'$WHY_TAG' is not a valid --why tag"; exit 2 ;;
-  esac
-  if [ "$WHY_TAG" = blocks ] && [ -z "$WHY_NOTE" ]; then
-    why_refusal "--why blocks must name what it blocks (--why blocks:<what>)"
-    exit 2
-  fi
-  WHY_RECORD=$WHY_TAG
-  [ -n "$WHY_NOTE" ] && WHY_RECORD="$WHY_TAG: $WHY_NOTE"
-fi
 
 # Batch dispatch (see header): when the first positional is an `id=repo` pair, treat every
 # positional as one and spawn each by re-execing this script in single-task mode. We use
@@ -212,31 +76,6 @@ fi
 idpart=${POS[0]:-}
 idpart=${idpart%%=*}
 if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in */*) false ;; *) true ;; esac; then
-  # --reopen-closed is the ONE designed bypass of the closed-topic gate, and it is a
-  # per-task authorisation the captain gave for one topic. A shared batch flag would
-  # widen that single authorisation into a blanket bypass for every pair, each
-  # recording reopened_closed= for whatever it happened to match. The escape hatch
-  # stays exactly as narrow as the single-task path: spawn the authorised task alone.
-  if [ -n "$REOPEN_CLOSED" ]; then
-    {
-      echo "error: --reopen-closed is not accepted in batch dispatch."
-      echo "Reopening a closed topic is a per-task authorisation from the captain; a shared flag"
-      echo "would bypass the closed-topic gate for every pair in the batch. Spawn the authorised"
-      echo "task on its own with --reopen-closed, and batch the rest."
-    } >&2
-    exit 2
-  fi
-  # Same reasoning for the unfilled-brief override: it says "I looked at THIS brief and
-  # it is deliberately shaped like the scaffold", which is a statement about one task.
-  if [ -n "$ALLOW_UNFILLED_TASK" ]; then
-    {
-      echo "error: --allow-unfilled-task is not accepted in batch dispatch."
-      echo "It is a per-task judgement about one brief; a shared flag would waive the unfilled-brief"
-      echo "check for every pair in the batch. Spawn that task on its own with --allow-unfilled-task,"
-      echo "and batch the rest."
-    } >&2
-    exit 2
-  fi
   rc=0
   for pair in "${POS[@]}"; do
     case "$pair" in
@@ -247,13 +86,11 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
       echo "error: batch dispatch does not support --secondmate; spawn each secondmate explicitly" >&2
       rc=2
       continue
+    elif [ "$KIND" = scout ]; then
+      if FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "${pair%%=*}" "${pair#*=}" --scout; then :; else echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2; rc=1; fi
+    else
+      if FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "${pair%%=*}" "${pair#*=}"; then :; else echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2; rc=1; fi
     fi
-    # The shared --why (already validated above) is forwarded to every pair, so each
-    # task's meta records its own why=. --reopen-closed is refused above rather than
-    # forwarded, so every pair meets the closed-topic gate on its own terms.
-    batch_flags=(--why "$WHY_RECORD")
-    if [ "$KIND" = scout ]; then batch_flags+=(--scout); fi
-    if FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "${pair%%=*}" "${pair#*=}" "${batch_flags[@]}"; then :; else echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2; rc=1; fi
   done
   exit "$rc"
 fi
@@ -502,19 +339,6 @@ if [ "$KIND" = secondmate ]; then
   else
     echo "warning: secondmate $ID sync skipped before launch: primary default-branch commit cannot be resolved" >&2
   fi
-  # Point this home at the ONE main firstmate home whose data/closed.md and
-  # data/access.md it must read. Seeding records it; every launch rewrites it, so a
-  # home that was moved, re-registered, or seeded before this existed converges here
-  # rather than running on with a control it cannot reach. Resolved transitively, so
-  # a secondmate that launches another one hands down the same main home rather than
-  # starting a chain.
-  if sm_fleet_home=$(fm_primary_home "$FM_HOME"); then
-    if ! sm_ptr_err=$(fm_write_primary_home_pointer "$PROJ_ABS" "$sm_fleet_home"); then
-      echo "warning: secondmate $ID: could not record the main firstmate home: $sm_ptr_err" >&2
-    fi
-  else
-    echo "warning: secondmate $ID: cannot resolve the main firstmate home from $FM_HOME ($sm_fleet_home), so this home's closed-topic register and fleet access map stay unreachable" >&2
-  fi
   if [ -f "$PROJ_ABS/data/charter.md" ]; then
     BRIEF="$PROJ_ABS/data/charter.md"
   else
@@ -526,218 +350,6 @@ else
   BRIEF="$DATA/$ID/brief.md"
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
-
-# INTAKE GATE 2a: an unfilled brief refuses.
-#
-# The scaffold writes a {TASK} placeholder for firstmate to replace, and AGENTS.md
-# says to replace it before spawning - another written rule, so it belongs in a
-# refusal rather than in prose. It also matters to the gate below: gate 2's haystack
-# is the task id plus the task-specific text, so an unreplaced placeholder presents
-# an essentially empty haystack and the one un-talk-past-able gate quietly becomes a
-# no-op exactly when the brief is broken. Secondmate charters keep their own handling
-# (fm-brief.sh reports a charter that still carries the placeholder).
-#
-# Matched ONLY where the scaffold leaves it: a line whose entire content is the
-# placeholder, and - in a brief that carries a task heading, which every generated
-# brief does - OUTSIDE any fenced code block. A task body is free text, and in this
-# repo a brief about the brief scaffold legitimately writes "replace the {TASK}
-# placeholder" in prose and demonstrates the scaffold's shape in a fence:
-#
-#     ```markdown
-#     # Task
-#     {TASK}
-#     ```
-#
-# so both forms have to pass. The fence tracking is deliberately the whole of the
-# markdown this check understands: it is a collision guard, not a parser.
-#
-# THE SCAN IS SCOPED TO THE BRIEF'S OWN TASK SECTION, and fence state is RESET there,
-# because nothing above that heading can say whether the task section was filled in.
-# The block above it is the injected engineering conventions, copied out of
-# data/captain.md by a cut at the next heading, so a fenced example in the captain's
-# conventions is truncated mid-fence and leaves a fence hanging open. Tracked across
-# the whole brief, that open fence swallowed the placeholder line and reported the
-# brief as FILLED: the crewmate spawned on a placeholder, and gate 2 went vacuous on
-# the same brief at the same moment, silently, because of text the captain wrote
-# somewhere else entirely.
-#
-# The direction of failure here is INVERTED from the closed-topic haystack, and the
-# two must not be reasoned about together. That haystack keeps MORE text when unsure,
-# because a missed closure is invisible. This check REFUSES when unsure, because a
-# false refusal is loud, lands on whoever ran the spawn, and has --allow-unfilled-task
-# to get through, while a missed unfilled brief is silent and takes gate 2 down with
-# it. So an unbalanced fence never infers "filled": a placeholder inside a fence that
-# is still open at the end of the scan counts as unfilled.
-#
-# --allow-unfilled-task is the escape hatch, and it exists because a check with no
-# recourse eventually blocks legitimate work with no way through - gate 2 itself has
-# --reopen-closed, and this check must not be stricter than the closure gate. Like
-# that flag it is loud and recorded in meta, so the waiver leaves a trace.
-brief_has_unfilled_task() {
-  awk '
-    function trim(t) { sub(/^[ \t]+/, "", t); sub(/[ \t\r]+$/, "", t); return t }
-    # Anchor on the COLUMN-ZERO heading fm-brief.sh emits, not on any line whose
-    # trimmed text happens to match. An indented "# Task" can reach the brief inside
-    # a fenced example in the captain-authored conventions, and anchoring there moves
-    # the scan above the real task section and re-enables fence tracking across
-    # exactly the truncated-mid-fence region this scoping exists to exclude.
-    { all[n++] = $0; if (!start && $0 ~ /^# Task[ \t\r]*$/) start = n }
-    END {
-      # NO TASK HEADING MEANS NO FENCE TRACKING AT ALL. Fences are read only inside
-      # the task section, where the structure is known; a brief with no task heading
-      # offers no evidence about where a fence opened, so any standalone placeholder
-      # is unfilled. Scanning the whole file for fences instead is what let an open
-      # fence in the injected conventions swallow the placeholder. Do not reinstate
-      # it: this check refuses when unsure, and that is the entire margin it has.
-      if (!start) {
-        for (i = 0; i < n; i++) if (trim(all[i]) == "{TASK}") exit 0
-        exit 1
-      }
-      for (i = start; i < n; i++) {
-        line = trim(all[i])
-        if (line ~ /^(```|~~~)/) {
-          if (!fence) { fence = 1; marker = substr(line, 1, 3); pending = 0 }
-          else if (substr(line, 1, 3) == marker) { fence = 0; pending = 0 }
-          continue
-        }
-        if (line != "{TASK}") continue
-        if (!fence) { found = 1; break }
-        pending = 1
-      }
-      # A fence still open at the end never closed, so a placeholder "inside" it was
-      # never demonstrably inside a fenced block. Resolve that to unfilled.
-      if (!found && fence && pending) found = 1
-      exit(found ? 0 : 1)
-    }
-  ' "$1"
-}
-UNFILLED_TASK_ALLOWED=
-if [ "$KIND" != secondmate ] && brief_has_unfilled_task "$BRIEF"; then
-  if [ -n "$ALLOW_UNFILLED_TASK" ]; then
-    UNFILLED_TASK_ALLOWED=1
-    {
-      echo "!!! WARNING: --allow-unfilled-task is waiving the unfilled-brief check."
-      echo "!!! $BRIEF carries the scaffold's {TASK} placeholder on a line of its own."
-      echo "!!! An unfilled task body also narrows what the closed-topic gate can match."
-      echo "!!! Recorded in $STATE/$ID.meta."
-    } >&2
-  else
-    {
-      echo "error: refusing to spawn $ID - the brief was never filled in."
-      echo "  $BRIEF still carries the scaffold's {TASK} placeholder on a line of its own."
-      echo
-      echo "Fix it by filling in the brief's task section: replace that {TASK} line with the"
-      echo "task description, acceptance criteria, and any context the crewmate needs, then"
-      echo "spawn again. An unfilled brief also empties the closed-topic gate's haystack, so"
-      echo "the closure check would pass without having checked anything. If that line is"
-      echo "deliberately part of the task, pass --allow-unfilled-task (it is recorded in meta)."
-    } >&2
-    exit 4
-  fi
-fi
-
-# INTAKE GATE 2: closed topics refuse at intake.
-#
-# The captain has closed topics across multiple sessions, and each new session
-# reopened them, because a closure recorded only in prose does not survive a context
-# reset while the topic itself still looks live. Closure is therefore enforced where
-# the work would START, not where it would be reported: by the time a report exists,
-# the attention has already been spent. Matched against the task id AND the brief with
-# fm-brief.sh's marked boilerplate regions stripped out (see bin/fm-closed-lib.sh
-# for the register format and matching rule). Secondmate launches are exempt - they
-# carry a charter, not a task.
-#
-# The register is the fleet's one register in the MAIN firstmate home, resolved above:
-# most crews are dispatched by secondmates, so enforcing a per-home copy would enforce
-# closures everywhere except where work actually starts.
-#
-# The stripped regions are the ones fm-brief.sh both wrapped in its fm:boilerplate
-# markers AND opened with a generated heading: the conventions, setup, rules, freshness,
-# access-routing, fleet-map, project-memory and definition-of-done blocks it injects into
-# every brief. Matching those too would let one unlucky keyword refuse every dispatch in
-# the fleet; a gate that fails closed on everything is worse than the failure it was built
-# to stop. Everything else stays matched - all of a hand-written brief, and every line of a
-# task body including its own "# " headings and any marker pair it quotes around text that
-# is not itself a generated section - and an absent marker, an unbalanced marker, or a
-# marked region that does not open with a generated heading widens the haystack rather than
-# narrowing it, so the gate can never quietly cover less than the captain believes. The one
-# case that does narrow is where both signals still agree: a task body pasting a COMPLETE
-# injected block verbatim, markers and generated heading intact, is stripped like the real
-# thing. That is the accepted intersection of the two holes either signal has alone.
-# FM_CLOSED_EXPLAIN=1 shows exactly what was matched.
-REOPENED_CLOSED=
-# An unresolvable register is not "no closures set": it is the gate having no idea
-# what the captain closed, which is exactly the state that must never pass quietly.
-# It warns rather than refuses, because failing closed on every dispatch from a
-# secondmate home would be its own outage.
-if [ "$KIND" != secondmate ] && [ -n "$CLOSED_UNRESOLVED" ]; then
-  fm_fleet_register_warning "$FM_HOME" closed.md "$CLOSED_UNRESOLVED"
-fi
-if [ "$KIND" != secondmate ] && [ -n "$CLOSED_SHADOW" ]; then
-  fm_fleet_shadow_warning "$CLOSED_SHADOW" closed.md "$CLOSED"
-fi
-if [ "$KIND" != secondmate ] && [ -n "$CLOSED" ] && [ -f "$CLOSED" ]; then
-  # A "- " line that is not a well-formed entry gates nothing, so say so out loud
-  # rather than skipping it: a typo'd closure that fails silently leaves the captain
-  # believing a topic is closed when the gate has quietly stopped covering it. It is
-  # a warning, not a refusal - an unrelated task must not be blocked by someone
-  # else's typo.
-  closed_bad=$(fm_closed_malformed "$CLOSED")
-  if [ -n "$closed_bad" ]; then
-    {
-      echo "warning: $CLOSED has line(s) that are NOT well-formed closures, so they close NOTHING:"
-      printf '%s\n' "$closed_bad" | sed 's/^/  /'
-      echo "expected format: - <slug>: <comma-separated keywords>: <one-line why> (closed <date>)"
-    } >&2
-  fi
-  closed_hay=$(mktemp "${TMPDIR:-/tmp}/fm-closed.XXXXXX")
-  # A brace group with a redirection, never a command substitution: the body has to be
-  # produced in THIS shell so FM_CLOSED_LAST_MARKER_STATUS survives for the explain
-  # block below, which is what keeps the counts and the body from one single walk.
-  { printf '%s\n' "$ID"; fm_closed_haystack_body "$BRIEF"; } > "$closed_hay"
-  # Narrowing the haystack is the one place this gate can quietly cover less than the
-  # captain believes, so it has to be inspectable rather than merely asserted to be
-  # correct: FM_CLOSED_EXPLAIN=1 shows what was dropped and what was actually matched.
-  case "${FM_CLOSED_EXPLAIN:-}" in
-    ''|0|false|no|off) : ;;
-    *)
-      read -r closed_marker_state closed_marker_count closed_marker_kept <<EOF
-$FM_CLOSED_LAST_MARKER_STATUS
-EOF
-      {
-        echo "closed-topic gate: brief $BRIEF"
-        echo "closed-topic gate: boilerplate markers: $closed_marker_state, regions stripped: $closed_marker_count, regions kept: $closed_marker_kept"
-        echo "closed-topic gate: haystack matched against $CLOSED follows"
-        sed 's/^/  | /' "$closed_hay"
-      } >&2
-      ;;
-  esac
-  closed_hits=$(fm_closed_match "$CLOSED" "$closed_hay" || true)
-  rm -f "$closed_hay"
-  if [ -n "$closed_hits" ]; then
-    closed_slugs=$(printf '%s\n' "$closed_hits" | cut -f1 | paste -sd, -)
-    if [ -n "$REOPEN_CLOSED" ]; then
-      REOPENED_CLOSED=$closed_slugs
-      {
-        echo "!!! WARNING: --reopen-closed is REOPENING a topic the captain closed."
-        echo "!!! Closure(s) overridden: $closed_slugs"
-        printf '%s\n' "$closed_hits" | cut -f2- | sed 's/^/!!!   /'
-        echo "!!! This is only correct if the captain authorised the reopen. Recorded in $STATE/$ID.meta."
-      } >&2
-    else
-      {
-        echo "error: refusing to spawn $ID - this topic is CLOSED."
-        printf '%s\n' "$closed_hits" | cut -f2- | sed 's/^/  /'
-        echo
-        echo "The captain closed it; a closure is a decision, not a stale note. Do not"
-        echo "re-investigate, re-litigate, or re-raise it. If the captain has explicitly"
-        echo "authorised reopening it, pass --reopen-closed (it is recorded in meta);"
-        echo "otherwise drop the work. The register is $CLOSED."
-      } >&2
-      exit 3
-    fi
-  fi
-fi
 
 # Same session when firstmate already runs inside tmux; dedicated session otherwise.
 if [ -n "${TMUX:-}" ]; then
@@ -883,13 +495,6 @@ mkdir -p "$STATE"
   if [ "$KIND" = secondmate ]; then
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
-  else
-    # Why this work exists (intake gate 1), any closure it overrode (gate 2), and any
-    # waived unfilled-brief check (gate 2a), so the provenance of a task - including
-    # every gate it was let through - survives the session that dispatched it.
-    echo "why=$WHY_RECORD"
-    if [ -n "$REOPENED_CLOSED" ]; then echo "reopened_closed=$REOPENED_CLOSED"; fi
-    if [ -n "$UNFILLED_TASK_ALLOWED" ]; then echo "allowed_unfilled_task=1"; fi
   fi
 } > "$STATE/$ID.meta"
 

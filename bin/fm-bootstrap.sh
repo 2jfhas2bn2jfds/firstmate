@@ -7,10 +7,6 @@
 #                 "CREW_HARNESS_OVERRIDE: <name>",
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
 #                 "TASKS_AXI: available", "TANGLE: <remediation>",
-#                 "CLOSED_TOPICS: <n> closed at intake: <slugs>",
-#                 "CLOSED_TOPICS_MALFORMED: closes nothing, fix or remove: <line>",
-#                 "CLOSED_TOPICS_UNRESOLVED: <reason>",
-#                 "CLOSED_TOPICS_LOCAL_IGNORED: <path> is IGNORED; ...",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: <window-targets...>",
 #                 "FMX: X mode on ..." or "FMX: X mode off ...",
@@ -29,22 +25,6 @@
 #          "treehouse get --lease" support.
 #          no-mistakes is also MISSING when its installed version is older than
 #          1.31.2.
-#          A CLOSED_TOPICS line lists the topics the captain has closed, which
-#          fm-spawn refuses at intake (bin/fm-closed-lib.sh). It is printed only
-#          when data/closed.md holds at least one well-formed entry; an absent or
-#          entry-free register is silent, so bootstrap stays quiet by default.
-#          A CLOSED_TOPICS_MALFORMED line names a register bullet that is not a
-#          well-formed entry, because it closes nothing while looking like a closure.
-#          The register is fleet-wide and lives in the MAIN firstmate home; a
-#          secondmate home reads it through its recorded pointer, and prints
-#          "CLOSED_TOPICS_UNRESOLVED: <reason>" when it cannot reach it, because a
-#          gate that cannot see the closures is broken rather than empty, or
-#          "CLOSED_TOPICS_LOCAL_IGNORED: ..." when it holds a register of its own,
-#          which nothing reads.
-#          Bootstrap also refreshes config/primary-home in every live secondmate
-#          home so a home seeded before that pointer existed, or one whose main home
-#          moved, converges at session start instead of warning until it is
-#          relaunched. Silent and best-effort; it writes no tracked file.
 #          tasks-axi is an OPTIONAL backlog-management capability reported only
 #          when tasks-axi --version is 0.1.1 or newer. It is never a MISSING
 #          line and never prompts an install.
@@ -77,15 +57,10 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
-DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # shellcheck source=bin/fm-tasks-axi-lib.sh
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-tangle-lib.sh
 . "$SCRIPT_DIR/fm-tangle-lib.sh"
-# shellcheck source=bin/fm-closed-lib.sh
-. "$SCRIPT_DIR/fm-closed-lib.sh"
-# shellcheck source=bin/fm-fleet-home-lib.sh
-. "$SCRIPT_DIR/fm-fleet-home-lib.sh"
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 # shellcheck source=bin/fm-x-lib.sh
@@ -133,42 +108,6 @@ fleet_sync() {
     esac
   done < "$tmp"
   rm -f "$tmp"
-}
-
-# Converge every live secondmate home's fleet-home pointer (config/primary-home) on
-# THIS session's main firstmate home, so the fleet's one closed-topic register and
-# access map stay reachable from the homes that dispatch most of its crews.
-#
-# The pointer was previously written only at seed time and at --secondmate launch, so
-# every home seeded before it existed stayed unmigrated: its bootstrap reported the
-# register as unresolved and every ship and scout spawn from it warned, until someone
-# relaunched it. Loud is right for a BROKEN control, but an unmigrated one is not
-# broken, and routine output full of warnings teaches people to skim the warning that
-# matters. Converging here also keeps the pointer correct if the main home ever moves,
-# which is the property that made a pointer preferable to copying the register.
-#
-# Silent and best-effort. It writes one gitignored config/ file, never a tracked one,
-# so it cannot disturb the fast-forward sweep or the home's operational dirs;
-# a home whose pointer cannot be written stays on the loud path in its own bootstrap
-# and at its own spawns, which is where that failure belongs.
-secondmate_pointer_sync() {
-  [ -d "$STATE" ] || return 0
-  local primary meta home pointer current
-  primary=$(fm_primary_home "$FM_HOME") || return 0
-  for meta in "$STATE"/*.meta; do
-    [ -f "$meta" ] || continue
-    grep -q '^kind=secondmate' "$meta" 2>/dev/null || continue
-    home=$(grep '^home=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
-    [ -n "$home" ] || continue
-    fm_is_secondmate_home "$home" || continue
-    pointer="$home/$FM_PRIMARY_HOME_POINTER"
-    if [ ! -L "$pointer" ]; then
-      current=$(head -n 1 "$pointer" 2>/dev/null || true)
-      [ "$current" = "$primary" ] && continue
-    fi
-    fm_write_primary_home_pointer "$home" "$primary" >/dev/null 2>&1 || true
-  done
-  return 0
 }
 
 secondmate_sync() {
@@ -483,47 +422,6 @@ liveness_daemon_ensure() {
   ( FM_HOME="$FM_HOME" nohup "$daemon" >/dev/null 2>&1 & )
 }
 
-# Closed topics the intake gate will refuse (bin/fm-closed-lib.sh). Reported at
-# session start so the closures are visible before any dispatch decision is made,
-# rather than only surfacing as a refusal later. Silent when the register is absent
-# or holds no entries: bootstrap's contract is that silence means all good.
-#
-# A bullet that is not a well-formed entry is NOT all good: it closes nothing while
-# looking like a closure, so it is reported line by line rather than skipped. The
-# count of well-formed slugs cannot show that, because nobody counts. An entry whose
-# keyword list is empty or normalizes to nothing is one of those: it would otherwise
-# be counted in the CLOSED_TOPICS line, positively telling the captain a topic is
-# closed while the gate covered none of it.
-#
-# The register is fleet-wide and lives in the MAIN firstmate home, so a secondmate
-# home resolves it through its recorded pointer (bin/fm-fleet-home-lib.sh). A
-# secondmate home that cannot resolve it is NOT an all-good silence: the gate is
-# broken there rather than empty, and since most crews are dispatched by secondmates
-# that silence would hide the control being inert exactly where work starts.
-closed_topics_report() {
-  local register slugs malformed count shadow
-  # A secondmate home that keeps its own data/closed.md is a closure the captain
-  # believes is set and that nothing reads. Reported before the register itself, so
-  # it is visible even when the pointer is also broken.
-  shadow=$(fm_fleet_shadow_register "$FM_HOME" "$DATA" closed.md)
-  if [ -n "$shadow" ]; then
-    echo "CLOSED_TOPICS_LOCAL_IGNORED: $shadow is IGNORED; closures belong in the main firstmate home's data/closed.md, which this home reads through $FM_PRIMARY_HOME_POINTER"
-  fi
-  if ! register=$(fm_fleet_register "$FM_HOME" "$DATA" closed.md); then
-    echo "CLOSED_TOPICS_UNRESOLVED: this secondmate home cannot reach the fleet's data/closed.md: $register"
-    return 0
-  fi
-  [ -f "$register" ] || return 0
-  malformed=$(fm_closed_malformed "$register")
-  if [ -n "$malformed" ]; then
-    printf '%s\n' "$malformed" | sed 's/^/CLOSED_TOPICS_MALFORMED: closes nothing, fix or remove: /'
-  fi
-  slugs=$(fm_closed_slugs "$register")
-  [ -n "$slugs" ] || return 0
-  count=$(printf '%s\n' "$slugs" | wc -l | tr -d ' ')
-  echo "CLOSED_TOPICS: $count closed at intake: $(printf '%s\n' "$slugs" | paste -sd, - | sed 's/,/, /g')"
-}
-
 if [ "${1:-}" = "install" ]; then
   shift
   [ $# -gt 0 ] || { echo "usage: fm-bootstrap.sh install <tool>..." >&2; exit 1; }
@@ -559,12 +457,7 @@ crew=
 [ -f "$CONFIG/crew-harness" ] && crew=$(tr -d '[:space:]' < "$CONFIG/crew-harness" || true)
 [ -n "$crew" ] && [ "$crew" != "default" ] && echo "CREW_HARNESS_OVERRIDE: $crew"
 fm_tasks_axi_compatible && echo "TASKS_AXI: available"
-closed_topics_report
-# After the fast-forward sweep, never before it: config/ is gitignored, so the pointer
-# write cannot dirty a home either way, but keeping the write downstream of the sweep
-# means this convergence can never be what stops a home advancing.
 secondmate_sync
-secondmate_pointer_sync
 x_mode_setup
 email_mode_setup
 fleet_sync

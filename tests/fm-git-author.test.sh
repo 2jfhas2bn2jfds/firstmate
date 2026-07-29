@@ -231,7 +231,7 @@ test_spawn_sets_worktree_identity() {
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     PATH="$fakebin:$BASE_PATH" \
-    "$ROOT/bin/fm-spawn.sh" set-id-a1 "$proj" codex --why captain 2>&1) \
+    "$ROOT/bin/fm-spawn.sh" set-id-a1 "$proj" codex 2>&1) \
     || fail "spawn failed: $out"
 
   assert_contains "$out" "spawned set-id-a1" "spawn did not report success"
@@ -263,7 +263,7 @@ test_spawn_reports_conflict() {
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     PATH="$fakebin:$BASE_PATH" \
-    "$ROOT/bin/fm-spawn.sh" set-id-b2 "$proj" codex --why captain 2>&1) \
+    "$ROOT/bin/fm-spawn.sh" set-id-b2 "$proj" codex 2>&1) \
     || fail "spawn failed: $out"
 
   assert_contains "$out" "spawned set-id-b2" "spawn did not report success"

@@ -43,7 +43,6 @@ This is.. a directory that turns any agent into your firstmate, and you the capt
 - **A visible crew** - every crewmate works in its own tmux window you can watch or type into; the first mate reconciles.
 - **Disposable worktrees** - each task runs in a clean [treehouse](https://github.com/kunchenguid/treehouse) git worktree, so parallel work on one repo never collides.
 - **Two task shapes** - ship tasks deliver a change; scout tasks investigate, plan, reproduce, or audit and leave a report.
-- **Deliberate dispatch** - every task has to name why it exists (you asked, it blocks something you asked for, or it is a live incident), and topics you have closed are refused at the moment work would start, so nothing self-initiated quietly fills your queue.
 - **Explicit project modes** - each project ships via `no-mistakes`, `direct-PR`, or `local-only`, with an optional `+yolo` autonomy flag.
 - **Optional secondmates** - opt in to persistent domain supervisors that run from isolated firstmate homes with their own `FM_HOME`, state, projects, and session lock, kept on the primary firstmate version by guarded local fast-forwards.
 - **Event-driven, zero-token supervision** - a bash watcher sleeps on the fleet and wakes the first mate only when something needs you.

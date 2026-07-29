@@ -40,13 +40,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 SECONDMATE_REG="$DATA/secondmates.md"
-# shellcheck source=bin/fm-fleet-home-lib.sh
-. "$SCRIPT_DIR/fm-fleet-home-lib.sh"
-# One definition of the secondmate marker, sourced above: the secondmate safety
-# check below and the fleet-register redirection key on the same name, so a rename
-# that missed a copy would split "is this a secondmate home?" between call sites
-# with no symptom.
-SUB_HOME_MARKER="$FM_SECONDMATE_HOME_MARKER"
+SUB_HOME_MARKER=".fm-secondmate-home"
 # shellcheck source=bin/fm-tasks-axi-lib.sh
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 "$FM_ROOT/bin/fm-guard.sh" || true
