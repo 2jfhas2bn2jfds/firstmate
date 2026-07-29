@@ -56,31 +56,10 @@ Ship briefs also tell the crewmate to verify `pwd -P` and `git rev-parse --show-
 
 Ship tasks change projects and ship by project mode (`no-mistakes`, `direct-PR`, or `local-only`); scout tasks investigate, plan, reproduce bugs, or audit, then leave a report at `data/<id>/report.md` and never push.
 
-## Intake gates
-
-Whether work starts at all is decided by refusals in `bin/fm-spawn.sh` rather than by guidance, because a refusal with a non-zero exit is the one control here that a fresh session cannot talk past.
-
-Every ship and scout spawn must declare why the work exists with `--why <tag>[:<note>]`, and there are exactly three tags: `captain` (the captain asked for it), `blocks:<what>` (it blocks something the captain asked for, naming what), and `incident` (a live production incident affecting users now).
-There is deliberately no tag for "interesting", "worth doing", "found while looking at X", or "tidy-up", so self-initiated work has no way through the gate and goes to the backlog for the captain to choose instead.
-The tag and note are recorded as `why=` in `state/<id>.meta`, so a task's provenance outlives the session that dispatched it.
-`--secondmate` launches are exempt, since starting a persistent supervisor is lifecycle rather than work.
-
-Topics the captain has closed live in the fleet-wide `data/closed.md` register, and a ship or scout spawn whose task id or brief matches one refuses before any window, worktree, or meta exists, printing the matching closure line verbatim; bootstrap lists the closed slugs once per session so they are visible before any dispatch decision.
-A brief that still carries the scaffold's unreplaced `{TASK}` placeholder refuses ahead of that check, because an unfilled brief would leave the closure match with nothing to match against.
-`--reopen-closed` and `--allow-unfilled-task` are the two recorded escape hatches; each is loud, each leaves a trace in meta, and batch dispatch refuses both, so a single per-task authorization never widens into a blanket bypass for every pair.
-The register format, the exact matching rule, and the pointer a secondmate home reads the fleet's one register through are documented in [configuration.md](configuration.md).
-
-Two related controls are deliberately conventions rather than checks, and are written that way on purpose.
-Ship and scout briefs carry a freshness-provenance section requiring `[fetched <source> <ISO-8601 timestamp>]` on any claim about live state, and firstmate relays an untagged live-state claim as "not checked" rather than as fact; no script can tell a fresh description of a live artifact from a stale one, which is the exact failure the section addresses.
-Those briefs also carry an access-and-routing section: a crewmate makes one small read-only probe of a capability, uses it if the probe answers, and escalates a failed probe as a blocker instead of downgrading its answer into a caveat, with the fleet's `data/access.md` appended as the access map.
-Firstmate's half of that rule is that an unclosed gap in a crew report is either closed by running the query from its own session or dropped explicitly, never relayed with the gap left sitting.
-
 ## Optional secondmates
 
 `data/secondmates.md` records persistent domain supervisors with natural-language scopes, project clone lists, and home paths.
 `fm-home-seed.sh` provisions the isolated home, clones the listed PR-based projects into it, initializes newly cloned `no-mistakes` projects, copies the charter to `data/charter.md`, and `fm-spawn.sh --secondmate` launches it through the same tmux and status-file path as any direct report.
-Seeding also records the main firstmate home's absolute path in the secondmate home's `config/primary-home`, which is how that home reaches the fleet-wide `data/closed.md` and `data/access.md`; every `--secondmate` launch and every main-home bootstrap converge that pointer, so a moved or pre-pointer home catches up on its own.
-The registers are read through the pointer and never copied into the home, because a stale copy is a closure that silently expires, and a pointer that cannot be resolved is reported loudly instead of reading as "nothing set".
 When seeded with `-`, the home is a durable treehouse lease under the secondmate id, so it survives with no live process and is not recycled by later `treehouse get` or pruning.
 Retirement or seed rollback returns the leased home; normal restart/recovery keeps it leased.
 If returning the lease fails during teardown, firstmate leaves the route and home intact instead of hiding a still-held lease.

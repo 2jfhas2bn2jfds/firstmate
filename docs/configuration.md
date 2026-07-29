@@ -22,62 +22,6 @@ It intentionally mirrors the behavior-test baseline in [`.github/workflows/ci.ym
 
 Personal preferences for one captain's fleet live locally in `data/captain.md`; it is gitignored and read after `data/projects.md` and optional `data/secondmates.md` during bootstrap.
 
-## Closed topics (data/closed.md)
-
-Topics the captain has closed live locally in `data/closed.md`; it is gitignored, because closures are captain-specific while the gate that enforces them is shared.
-`bin/fm-spawn.sh` matches every ship and scout spawn against it and refuses with exit 3 before any window or meta exists, printing the matching closure line verbatim; bootstrap reports the closed slugs once per session as `CLOSED_TOPICS:`.
-The register is fleet-wide and lives in the main firstmate home: a secondmate home keeps no copy of its own and reads that one file through its `config/primary-home` pointer, so a closure is enforced everywhere work is dispatched rather than only where the captain typed it (see [Fleet home pointer](#fleet-home-pointer-configprimary-home)).
-A closure written into a secondmate home's own `data/closed.md` is therefore never read, and that is reported rather than left to look like it took effect: every ship and scout spawn from that home warns on stderr naming the ignored file, and its bootstrap prints one `CLOSED_TOPICS_LOCAL_IGNORED:` line pointing at the register it does not override.
-Move those lines into the main home's register; the local file is neither deleted nor honoured.
-One entry per line:
-
-```markdown
-- <slug>: <comma-separated keywords>: <one-line why> (closed <date>)
-```
-
-Blank lines, `#` comments, and prose that does not start a bullet are ignored.
-A bullet is a `-` followed by any whitespace, tab included, because that is what markdown renders as a list item and therefore what reads as a closure; every bullet either closes something or is reported, with no silent third category.
-A bullet that is not a well-formed entry closes nothing, and is reported rather than silently skipped: `bin/fm-spawn.sh` warns to stderr without blocking the spawn, and bootstrap prints one `CLOSED_TOPICS_MALFORMED:` line naming the offending line.
-An entry is well-formed only when it can actually fire: both `:` separators, a non-empty slug, a keyword list holding at least one keyword that survives normalization (`- topic:: why` and `- topic: ---: why` do not), and a bullet starting at column one (an indented bullet is never matched).
-An entry with no usable keyword is therefore reported as malformed and left out of the `CLOSED_TOPICS:` count, rather than counted as a closure the gate can never fire on.
-A silent skip would leave the captain believing a topic is closed while the gate had quietly stopped covering it.
-
-Matching normalizes case and punctuation and requires whole-token phrase hits, so `post-deletion`, `Post Deletion`, and a phrase wrapped across a line break all match, while `billings` does not match `billing`.
-Breadth is the operator's lever: a one-word generic keyword blocks unrelated work that merely mentions it, so entries should carry specific multi-word phrases.
-The haystack is the task id plus the brief with `bin/fm-brief.sh`'s injected boilerplate stripped out (conventions, setup, rules, freshness, access and routing, fleet access map, project memory, definition of done), so a keyword that happens to appear in that boilerplate cannot refuse the whole fleet's dispatch.
-A region is dropped only when two independent signals agree: the explicit `<!-- fm:boilerplate start -->` / `<!-- fm:boilerplate end -->` markers the scaffold emits around each block it injects wrap it, AND its first non-blank line opens one of the sections the scaffold generates.
-Neither signal alone is enough, because either alone drops task content: heading text alone stops matching at a task body that quotes a generated heading such as `# Setup`, and markers alone drop a task body that quotes the marker pair in a fenced block.
-Everything else stays matched, including a task body's own `# ` headings, fenced snippets, and a marker pair it quotes around text that is not itself a generated section.
-The one case that still narrows is where both signals genuinely agree: a task body that pastes a complete injected block verbatim, markers and generated heading intact, is stripped exactly like the real one, which is the accepted intersection of the holes either signal has on its own.
-Every uncertain case keeps the whole region or the whole brief rather than dropping any of it: a brief with no markers at all (hand-written, or generated before markers existed) is matched whole with no heading-text fallback, a brief whose markers do not balance is matched whole and reported on stderr, and a marked region that does not open with a generated section is kept and reported on stderr.
-Narrowing therefore fails toward a loud false refusal, undone with one flag, rather than toward a closure silently covering less than the captain believes.
-Set `FM_CLOSED_EXPLAIN=1` on a spawn to print the exact haystack the gate matched, how many marked regions were stripped, and how many were kept because they were not recognisable.
-A ship or scout spawn whose brief still carries the scaffold's unreplaced `{TASK}` placeholder on a line of its own refuses with exit 4 before this gate runs, because an unfilled brief would leave the closure check with nothing to match.
-The scan starts at the brief's own `# Task` heading with fence state reset there, so in a generated brief, which always carries that heading, a task body that mentions the placeholder in prose or demonstrates the scaffold's shape inside a fence is unaffected: the task body is free text, and a brief about the brief scaffold legitimately does both.
-A brief with no `# Task` heading at all gets no fence tracking, because nothing outside a known task section says where a fence opened, so any standalone placeholder in such a brief refuses regardless of fences; `--allow-unfilled-task` is the way through.
-`--allow-unfilled-task` waives that check, warns loudly, and records `allowed_unfilled_task=1` in the task's meta; like `--reopen-closed` it is a per-task waiver, so batch dispatch refuses it.
-`--reopen-closed` is the one authorised bypass; it records `reopened_closed=<slug>` in the task's meta and is refused in batch dispatch, so one captain-authorised reopen never widens into a blanket bypass for every pair.
-
-## Fleet access map (data/access.md)
-
-What access this fleet has, where it lives, and how a crew reaches it lives locally in `data/access.md`; it is gitignored, because the inventory is captain-specific while the routing rule is shared.
-`bin/fm-brief.sh` appends it to every ship and scout brief under the `## Fleet access map` heading, so crews get a current inventory instead of one asserted in a tracked file.
-There is no required format; keep it a short list per capability and mark firstmate-only capabilities explicitly, since crew reach varies by harness and pane.
-The file is optional: when it is absent the structural probe-then-escalate section still ships, because the half that always applies is the routing rule rather than the inventory.
-Like the closed-topic register it is fleet-wide and lives in the main firstmate home; a secondmate home reads it through the same `config/primary-home` pointer, so the crews a secondmate spawns get the captain's map rather than an empty inventory.
-A map written into a secondmate home's own `data/access.md` reaches no brief, so brief generation there warns on stderr naming the ignored file instead of letting it look applied.
-
-## Fleet home pointer (config/primary-home)
-
-A secondmate home records the main firstmate home's absolute path in `config/primary-home`; it is local and gitignored, written by `bin/fm-home-seed.sh` at seed time, rewritten by `bin/fm-spawn.sh <id> --secondmate` on every launch, and refreshed across every live secondmate home by `bin/fm-bootstrap.sh` at session start, so a moved or re-registered home, or one seeded before the pointer existed, converges instead of running on with a control it cannot reach.
-That session-start convergence is silent and best-effort: an unmigrated home is not a broken one, and warning on its every routine dispatch until someone relaunches it would only teach the operator to skim the warning that matters.
-It is a pointer rather than a copy of the fleet registers on purpose: a copy drifts, and a stale copy is a closure that silently expires.
-A main firstmate home has no pointer and no marker file, and reads its own `data/`.
-The recorded path has to be a main firstmate home, not merely a directory that exists: a target carrying the secondmate marker, or missing `AGENTS.md`, `bin/`, or `data/`, is rejected like any other broken pointer.
-Otherwise a pointer aimed at the main home's parent or at an unrelated path would resolve to a register file that does not exist, and an absent register reads as "no closures set", which is the gate going inert with nothing said.
-When a secondmate home cannot resolve it (no pointer recorded, empty, relative, a symlink, naming a directory that does not exist, naming the home itself, or naming something that is not a main firstmate home), the closed-topic gate there is broken rather than empty, so it is loud: every ship and scout spawn from that home warns on stderr naming what could not be resolved, brief generation warns the same way about the access map, and that home's bootstrap prints `CLOSED_TOPICS_UNRESOLVED: <reason>`.
-It warns and proceeds rather than refusing, because failing closed on every dispatch from that home would be its own outage.
-
 ## Secondmate routes (data/secondmates.md)
 
 Persistent secondmate routes live locally in `data/secondmates.md`.
@@ -202,7 +146,6 @@ FM_CHECK_INTERVAL=300   # seconds between slow checks (merge polls or the X-mode
 FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh
 FM_CREW_STATE_BIN=bin/fm-crew-state.sh   # test override for the current-state reader used by provably-working watcher triage
-FM_CLOSED_EXPLAIN=      # truthy makes a spawn print, on stderr, the exact haystack the closed-topic gate matched, how many marked boilerplate regions were stripped from the brief, and how many were kept as unrecognisable; diagnostic only, it never changes the verdict
 FM_KEEP_MODEL_ENV=      # truthy keeps the model-selection env family at agent launch instead of stripping it, for Bedrock/Vertex setups that select the model that way; read from the environment only, never from this home's .env, so set it where every firstmate home inherits it (a shell profile or the tmux environment, the same place those model variables are set), because a launched pane inherits the tmux session environment rather than the environment of the process that ran fm-spawn, so setting it only in one agent's own process environment never reaches a secondmate or the crewmates that secondmate spawns
 FMX_PAIRING_TOKEN=      # X mode pairing token; .env opt-in authorizes replies and eligible lifecycle actions
 FMX_RELAY_URL=https://myfirstmate.io   # optional X relay override, mainly for local relay development

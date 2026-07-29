@@ -27,16 +27,11 @@ run_spawn() {
     "$SPAWN" "$@" 2>&1
 }
 
-# Every ship/scout spawn must declare --why (fm-spawn's intake gate 1), so these
-# argument-routing cases pass a valid one; the gate itself is covered in
-# tests/fm-intake-gates.test.sh.
-WHY=(--why captain)
-
 # Every pair in a batch is dispatched even though the first one fails; the loop
 # must not stop early. This is the load-bearing batch guarantee, kept explicit.
 test_batch_dispatches_every_pair() {
   local out status
-  out=$(run_spawn nope-batch-a-z1=projects/none-a nope-batch-b-z2=projects/none-b "${WHY[@]}")
+  out=$(run_spawn nope-batch-a-z1=projects/none-a nope-batch-b-z2=projects/none-b)
   status=$?
   [ "$status" -ne 0 ] || fail "batch with missing briefs should exit non-zero"
   printf '%s\n' "$out" | grep -F 'batch: FAILED to spawn nope-batch-a-z1 (projects/none-a)' >/dev/null \
@@ -54,7 +49,7 @@ test_batch_mode_boundaries() {
   while IFS='|' read -r label batch expect args; do
     [ -n "$label" ] || continue
     # shellcheck disable=SC2086  # args is an intentional word-split arg list
-    out=$(run_spawn $args "${WHY[@]}")
+    out=$(run_spawn $args)
     status=$?
     [ "$status" -ne 0 ] || fail "$label: expected non-zero exit"
     if [ -n "$expect" ]; then
@@ -85,12 +80,12 @@ test_projects_path_scoping() {
     if [ "$use_override" = yes ]; then
       out=$(FM_ROOT_OVERRIDE='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' FM_CONFIG_OVERRIDE='' \
         FM_HOME="$home" FM_PROJECTS_OVERRIDE="$projects" FM_SPAWN_NO_GUARD=1 \
-        "$SPAWN" "$id" projects/alpha codex --why captain 2>&1)
+        "$SPAWN" "$id" projects/alpha codex 2>&1)
     else
       mkdir -p "$home/projects/alpha"
       out=$(FM_ROOT_OVERRIDE='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' \
         FM_HOME="$home" FM_SPAWN_NO_GUARD=1 \
-        "$SPAWN" "$id" projects/alpha codex --why captain 2>&1)
+        "$SPAWN" "$id" projects/alpha codex 2>&1)
     fi
     status=$?
     [ "$status" -ne 0 ] || fail "$label: spawn with missing brief should fail"
