@@ -28,16 +28,44 @@
 # Scout tasks ignore mode - their deliverable is a report, not a merge.
 # Ship tasks include a project-memory section so durable project-intrinsic
 # learnings can be committed to AGENTS.md through the project's delivery path.
+# Ship and scout briefs also carry a required freshness-provenance section: any claim
+# about LIVE state must be tagged [fetched <source> <ISO-8601 timestamp>], and an
+# untagged live-state claim is reported as unverified rather than as fact.
+# They also carry an access-and-routing section (probe a capability once, then escalate
+# a failed probe rather than working around it) with the fleet's data/access.md map
+# appended when present, plus the matching access-wall rule: an unreachable
+# capability is escalated as a blocker, never downgraded into a caveat in the report.
 # Every generated brief (ship, scout, and the secondmate charter) also has the
 # captain's "## Engineering conventions" section from data/captain.md injected near
 # the top, so the conventions reach every crewmate at spawn; it is a graceful no-op
 # when captain.md or that section is absent.
+# Every block this script injects into a ship or scout brief is wrapped in the
+# <!-- fm:boilerplate start --> / <!-- fm:boilerplate end --> markers, so the
+# closed-topic gate can subtract generated text from its haystack by exact marker
+# instead of by heading text a task body may legitimately quote
+# (see bin/fm-closed-lib.sh). Anything outside those markers is task-specific.
+# The gate drops a marked region only when it ALSO opens with one of the section
+# openers listed in FM_CLOSED_INJECTED_OPENERS, so a task body that quotes the marker
+# pair around anything but a generated section keeps its text; a body that pastes a
+# complete injected block verbatim is stripped, which is the accepted residual.
+# Renaming a heading below without updating that list keeps the region in the
+# haystack, which is the safe direction but worth fixing.
 # Refuses to overwrite an existing brief.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-marker-lib.sh
 . "$SCRIPT_DIR/fm-marker-lib.sh"
+# For FM_CLOSED_BOILERPLATE_START/END: every block injected below is wrapped in those
+# markers so the closed-topic gate can subtract it from the haystack by exact marker
+# rather than by guessing at heading text a task body may also contain. The constants
+# live with the consumer that must recognise them, so the two cannot drift apart.
+# shellcheck source=bin/fm-closed-lib.sh
+. "$SCRIPT_DIR/fm-closed-lib.sh"
+# shellcheck source=bin/fm-fleet-home-lib.sh
+. "$SCRIPT_DIR/fm-fleet-home-lib.sh"
+BP_START=$FM_CLOSED_BOILERPLATE_START
+BP_END=$FM_CLOSED_BOILERPLATE_END
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
@@ -82,6 +110,107 @@ captain_conventions_body() {
     started { if (NF || seen) { seen = 1; print } }
   ' "$captain"
 }
+# Freshness provenance, injected into every ship and scout brief.
+#
+# This is a LOUD control, not an impossible one, and it is written here rather than
+# enforced in a script because no script can tell a fresh description of a live
+# artefact from a stale one - that is exactly the failure it addresses. A detailed,
+# confident, internally consistent account of a store listing was read as verified
+# because it was specific; it was months old. Specificity is not freshness, and
+# nothing in stale content distinguishes it from current content, so the only
+# available signal is an explicit fetch tag that a crewmate must either produce or
+# visibly fail to produce.
+#
+# Built from a function, like access_block_text below, so the heredoc is never
+# lexically nested inside the $(...) that captures it: bash 3.2 (macOS) mis-parses an
+# apostrophe in that shape and fails brief generation outright. The function form makes
+# that structural rather than a property of the text happening to avoid apostrophes.
+freshness_block_text() {
+  cat <<'EOF'
+
+# Freshness provenance (required)
+Any claim you make about LIVE state must carry an inline provenance tag: `[fetched <source> <ISO-8601 timestamp>]`.
+Live state means anything that can change without a commit: a store listing, the running app, production data, deployed config, dashboards, remote branches and PR state, third-party console settings, prices, live copy.
+Example: `the listing subtitle is "Fitness dating" [fetched App Store Connect 2026-07-27T14:02Z]`.
+An untagged live-state claim is UNVERIFIED. Write it as unverified ("not checked", "as of an unknown date"), never as fact, and carry that "not checked" through every place the claim is repeated: notes, report, PR body, status line.
+Specificity is not freshness. A detailed, confident, internally consistent description of a live artefact reads exactly the same whether it was fetched a minute ago or is months out of date, so detail is never evidence of recency and neither is your own confidence.
+If you cannot fetch it, say so plainly and say what you would have needed. Do not reconstruct live state from memory, from a previous report, from a cached export, or from the repo, and then present it as current.
+EOF
+}
+FRESHNESS_BLOCK=$(freshness_block_text)
+# The per-fleet access map, injected under the structural access section below.
+# Kept in the MAIN firstmate home's data/access.md - LOCAL and gitignored, because
+# which connectors, credentials and consoles exist is captain-specific while the
+# routing rule is shared - and pulled at generation time so it never goes stale in a
+# tracked file. It is fleet-wide, so a secondmate home reads that one map through its
+# recorded main-home pointer rather than a copy of its own, exactly like the
+# closed-topic register (bin/fm-fleet-home-lib.sh); otherwise the crews a secondmate
+# spawns, which is most of the fleet's crews, would get an empty inventory. An
+# unresolvable pointer warns loudly rather than passing as "no map". Graceful no-op
+# when the map is simply absent: the structural section still ships, because the part
+# that must always reach a crewmate is "probe, then escalate", not the inventory.
+fleet_access_body() {
+  local access shadow
+  # A map written into a secondmate home's own data/access.md reaches no brief, so it
+  # is named rather than left to look like it took effect.
+  shadow=$(fm_fleet_shadow_register "$FM_HOME" "$DATA" access.md)
+  if ! access=$(fm_fleet_register "$FM_HOME" "$DATA" access.md); then
+    if [ -n "$shadow" ]; then
+      fm_fleet_shadow_warning "$shadow" access.md ""
+    fi
+    fm_fleet_register_warning "$FM_HOME" access.md "$access"
+    return 0
+  fi
+  if [ -n "$shadow" ]; then
+    fm_fleet_shadow_warning "$shadow" access.md "$access"
+  fi
+  [ -f "$access" ] || return 0
+  cat "$access"
+}
+# Access and routing, injected into every ship and scout brief.
+#
+# The failure: a crewmate needed Sentry, could not reach it from its own pane,
+# quietly downgraded its answer to "could not establish", and buried that in a
+# report. Firstmate could have answered it from its own session in one call. The
+# same had already happened with RevenueCat and nobody generalised it.
+#
+# What this section deliberately does NOT say is "crews have no MCP access".
+# Measured from a claude crewmate pane on 2026-07-27, Sentry and RevenueCat MCP
+# both answered live, so a blanket "route everything through firstmate" would be a
+# confident, specific, WRONG instruction of exactly the kind the freshness section
+# above warns about - and it would push crews to escalate work they can simply do.
+# Reach varies by harness and by pane, so the rule is probe-then-escalate: one
+# cheap read-only call settles it, and only a failed probe (or a capability the
+# fleet map marks firstmate-only) becomes a routing question.
+access_block_text() {
+  cat <<'EOF'
+
+# Access and routing (read this before you write "could not check")
+Your pane is not firstmate's session. Some capabilities are reachable from here and some are not, and which is which depends on the harness you were launched on and the pane you are in. Never assume either way, in either direction.
+
+Settle it in this order:
+1. PROBE once. Make the smallest read-only call the capability offers: list organizations, list projects, fetch a single row. One call is enough, and it costs less than a paragraph of hedging.
+2. If the probe answers, use it, and tag what you fetched per the freshness rule above.
+3. If the probe fails, or the fleet map below marks the capability firstmate-only, STOP and escalate it as a blocker (see the access-wall rule in Rules). Do not work around it, do not substitute a weaker source, and do not write the answer as if the missing piece were unavailable to everyone.
+
+Firstmate's own session holds the fleet's connectors and credentials and can usually answer a specific question in a single call. So an access wall is a routing problem with a fast fix, not a limit on what the answer can be. The one thing that makes it permanent is you absorbing it silently.
+EOF
+}
+# Resolved only for the briefs that carry it. A charter never does, so resolving it
+# there would print the unreachable-register warning about an artifact that could not
+# have used the map anyway, and a warning that fires where it cannot apply is how the
+# ones that do apply stop being read.
+ACCESS_BLOCK=""
+if [ "$KIND" != secondmate ]; then
+  ACCESS_BLOCK=$(access_block_text)
+  ACCESS_BODY=$(fleet_access_body)
+  if [ -n "$ACCESS_BODY" ]; then
+    ACCESS_BLOCK="$ACCESS_BLOCK
+
+## Fleet access map
+$ACCESS_BODY"
+  fi
+fi
 CONV_BODY=$(captain_conventions_body)
 CONVENTIONS_BLOCK=""
 if [ -n "$CONV_BODY" ]; then
@@ -162,11 +291,15 @@ REPO=${POS[1]}
 
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
+$BP_START
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 ${CONVENTIONS_BLOCK}
+$BP_END
+
 # Task
 {TASK}
 
+$BP_START
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
 This is a SCOUT task: the deliverable is a written report, not a PR.
@@ -186,12 +319,21 @@ The report is the only thing that survives, so anything worth keeping must be in
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 6. If a decision belongs to a human (product choices, destructive actions),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
+7. Access walls are BLOCKERS, not caveats. The moment you cannot reach something the task
+   needs - a connector, a credential, a console, a dashboard, production data - append
+   \`blocked: no access to {what}, needed to {what you would do with it}\` and stop.
+   Never downgrade it into "could not establish", "unable to verify", or an assumption
+   carried quietly into the report. Firstmate can usually route the query in one call,
+   but only if you say so at the moment you hit the wall instead of writing around it.
+${FRESHNESS_BLOCK}
+${ACCESS_BLOCK}
 
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
 The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references), and what you recommend.
 When the report is complete, append \`done: {one-line conclusion}\` to the status file and stop.
 If your findings reveal work that should ship (e.g. you reproduced a bug and the fix is clear), say so in the report; firstmate may promote this task in place, and you would then receive mode-specific ship instructions as a follow-up message.
+$BP_END
 EOF
 echo "scaffolded: $BRIEF (scout; replace {TASK})"
 exit 0
@@ -220,11 +362,15 @@ case "$MODE" in
 esac
 
 cat > "$BRIEF" <<EOF
+$BP_START
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 ${CONVENTIONS_BLOCK}
+$BP_END
+
 # Task
 {TASK}
 
+$BP_START
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
 
@@ -248,11 +394,20 @@ $RULE1
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 6. If a decision belongs to a human (product choices, destructive actions, ask-user findings),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
+7. Access walls are BLOCKERS, not caveats. The moment you cannot reach something the task
+   needs - a connector, a credential, a console, a dashboard, production data - append
+   \`blocked: no access to {what}, needed to {what you would do with it}\` and stop.
+   Never downgrade it into "could not establish", "unable to verify", or an assumption
+   carried quietly into the report. Firstmate can usually route the query in one call,
+   but only if you say so at the moment you hit the wall instead of writing around it.
+${FRESHNESS_BLOCK}
+${ACCESS_BLOCK}
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
 If this task produced durable project-intrinsic knowledge, record it in \`AGENTS.md\` as part of your change.
 Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
+$BP_END
 EOF
 
 # Append the mode-specific definition of done as a direct heredoc (never inside a
@@ -264,27 +419,32 @@ case "$MODE" in
   direct-PR)
     cat >> "$BRIEF" <<EOF
 
+$BP_START
 # Definition of done
 This project ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
 When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
 Do NOT run /no-mistakes. The captain reviews and merges the PR; firstmate relays it.
+$BP_END
 EOF
     ;;
   local-only)
     cat >> "$BRIEF" <<EOF
 
+$BP_START
 # Definition of done
 This project ships **local-only**: no remote, no PR, no pipeline.
 The task is complete only when committed on your branch \`fm/$ID\`. Do NOT push, do NOT open a PR, do NOT merge.
 Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
 When it is implemented and committed, append \`done: ready in branch fm/$ID\` to the status file and stop.
 Firstmate then reviews your branch diff, the captain approves, and firstmate merges it into local \`main\`.
+$BP_END
 EOF
     ;;
   *)  # no-mistakes (default)
     cat >> "$BRIEF" <<EOF
 
+$BP_START
 # Definition of done
 The task is complete only when committed on your branch.
 When you believe it is complete, append \`done: {summary}\` to the status file and stop.
@@ -300,6 +460,7 @@ Two firstmate-specific rules layer on top of that guidance:
 - Avoid \`--yes\`: the captain, not you, owns the ask-user decisions it would silently auto-resolve.
 
 After /no-mistakes reports CI green, append \`done: PR {url} checks green\` and stop. You are finished.
+$BP_END
 EOF
     ;;
 esac

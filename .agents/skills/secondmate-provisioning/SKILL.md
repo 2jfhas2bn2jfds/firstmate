@@ -48,8 +48,11 @@ The slot stays reserved across restarts until the lease is released.
 Release happens only on explicit retirement or seed rollback, never on routine restart or recovery.
 
 `bin/fm-home-seed.sh` copies the charter into the secondmate home as `data/charter.md`.
+It also records the main firstmate home's absolute path in the secondmate home's `config/primary-home`, which is how that home reaches the fleet-wide `data/closed.md` and `data/access.md`.
+Those two are read through the pointer and never copied into the home: a copy drifts, and a stale copy is a closure that silently expires, so a secondmate home must not keep a competing `data/closed.md` of its own.
 `bin/fm-spawn.sh --secondmate` launches it through the same launch-template path.
 Before launch, `fm-spawn.sh --secondmate` locally fast-forwards the home to the primary firstmate checkout's current default-branch commit when it is safe; dirty, diverged, or in-flight homes launch unchanged with a warning.
+That launch also rewrites `config/primary-home`, so a moved or re-registered home converges instead of running on with a closed-topic gate it cannot reach; when the pointer cannot be resolved, ship and scout spawns from that home warn loudly and its bootstrap prints `CLOSED_TOPICS_UNRESOLVED:`.
 `bin/fm-home-seed.sh` refuses to copy a missing or placeholder charter.
 
 Direct seed without a preexisting brief requires `FM_SECONDMATE_CHARTER`.
