@@ -115,6 +115,18 @@ fm_git_identity() {
   export GIT_COMMITTER_NAME=$GIT_AUTHOR_NAME GIT_COMMITTER_EMAIL=$GIT_AUTHOR_EMAIL
 }
 
+# fm_git_isolate: neutralize the host's global and system git config for this
+# test process and every command it spawns. fm_git_identity only pins the author
+# of fixture commits; a suite that reads the EFFECTIVE config rather than
+# --local (core.hooksPath, say) still sees whatever the developer set in
+# ~/.gitconfig or /etc/gitconfig, and a global init.templateDir would seed every
+# fixture `git init` with real .git/hooks. Call it once, next to fm_git_identity,
+# in any suite whose behavior depends on non-local config being absent.
+fm_git_isolate() {
+  export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+  unset GIT_TEMPLATE_DIR
+}
+
 # fm_git_init_commit <dir>: create a git repo at <dir> with a README and one
 # commit. Uses an inline identity so it works whether or not fm_git_identity was
 # called.

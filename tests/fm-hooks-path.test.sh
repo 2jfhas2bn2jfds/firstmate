@@ -25,7 +25,10 @@
 #   - an unresolvable git common dir fails CLOSED (no write);
 #   - fm-spawn sets core.hooksPath in the isolated worktree it launches into, and
 #     reports a conflicting pool value instead of skipping silently.
-# All hermetic over temp git repos and fakebins; never touches global git config.
+# All hermetic over temp git repos and fakebins; never touches global git config,
+# and fm_git_isolate neutralizes the host's global/system config so a developer
+# who sets core.hooksPath or init.templateDir does not see false failures - this
+# suite reads the EFFECTIVE config, not just --local, so that leak is real.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -38,6 +41,7 @@ BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 
 TMP_ROOT=$(fm_test_tmproot fm-hooks-path)
 fm_git_identity fmtest fmtest@example.invalid
+fm_git_isolate
 
 HOOK_DIR='.githooks'
 
@@ -196,9 +200,13 @@ test_preserves_non_local_scope_value() {
   mkdir -p "$fakehome"
   printf '[core]\n\thooksPath = %s/global-hooks\n' "$fakehome" > "$fakehome/.gitconfig"
 
-  # A subshell so the fake HOME never leaks into the rest of the suite.
+  # A subshell so the fake global config never leaks into the rest of the suite.
+  # GIT_CONFIG_GLOBAL is what the suite-wide fm_git_isolate pins to /dev/null and
+  # it outranks HOME, so this test points it at the fixture rather than relying
+  # on HOME alone.
   out=$(
-    export HOME="$fakehome" XDG_CONFIG_HOME="$fakehome/.config" GIT_CONFIG_NOSYSTEM=1
+    export GIT_CONFIG_GLOBAL="$fakehome/.gitconfig" \
+      HOME="$fakehome" XDG_CONFIG_HOME="$fakehome/.config" GIT_CONFIG_NOSYSTEM=1
     [ -n "$(git -C "$repo" config core.hooksPath)" ] || { printf 'NO_GLOBAL\n'; exit 0; }
     fm_hooks_path_apply "$repo" report 2>&1
   ) || fail "apply returned non-zero with a global core.hooksPath"
@@ -277,14 +285,42 @@ SH
   chmod +x "$fakebin/git"
 
   # A subshell so the shimmed PATH never leaks into the rest of the suite.
+  # The controls matter: this is the one test that swaps out the git binary, so a
+  # shim that broke an EARLIER probe would make apply return at condition 1 and
+  # the "nothing was written" assertion would pass while proving nothing about
+  # the fail-closed branch. Each control reports a marker instead of writing, so
+  # a broken shim fails the test loudly.
   out=$(
     export PATH="$fakebin:$BASE_PATH"
     hash -r 2>/dev/null || true
+    git -C "$repo" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+      || { printf 'SHIM_BROKE_WORKTREE_PROBE\n'; exit 0; }
+    git -C "$repo" ls-files --error-unmatch -- "$HOOK_DIR" >/dev/null 2>&1 \
+      || { printf 'SHIM_BROKE_TRACKED_PROBE\n'; exit 0; }
+    [ -z "$(git -C "$repo" config core.hooksPath 2>/dev/null)" ] \
+      || { printf 'SHIM_BROKE_CONFIG_PROBE\n'; exit 0; }
+    git -C "$repo" rev-parse --path-format=absolute --git-common-dir >/dev/null 2>&1 \
+      && { printf 'SHIM_RESOLVED_COMMON_DIR\n'; exit 0; }
     fm_hooks_path_apply "$repo" report 2>&1
   ) || fail "apply returned non-zero with an unresolvable common dir"
 
+  assert_not_contains "$out" "SHIM_BROKE_WORKTREE_PROBE" \
+    "control: the shim broke the is-inside-work-tree probe, so apply never reached condition 3"
+  assert_not_contains "$out" "SHIM_BROKE_TRACKED_PROBE" \
+    "control: the shim broke the tracked-hooks probe, so apply never reached condition 3"
+  assert_not_contains "$out" "SHIM_BROKE_CONFIG_PROBE" \
+    "control: the shim broke the core.hooksPath probe, so apply never reached condition 3"
+  assert_not_contains "$out" "SHIM_RESOLVED_COMMON_DIR" \
+    "control: the shim did not actually fail --git-common-dir, so nothing was under test"
   [ -z "$(hooks_path "$repo")" ] \
     || fail "core.hooksPath was written past a guard that could not check .git/hooks: $out"
+
+  # The closing control: with the real git back, this very repo adopts. That
+  # proves the skip above was caused by the unresolvable common dir alone and
+  # not by some other unmet condition in the fixture.
+  fm_hooks_path_apply "$repo" || fail "apply returned non-zero with the real git"
+  [ "$(hooks_path "$repo")" = "$HOOK_DIR" ] \
+    || fail "control: the fixture never adopts even with a working git, so T7b proves nothing"
   pass "T7b an unresolvable git common dir fails closed, leaving the repo unchanged"
 }
 
