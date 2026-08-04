@@ -42,6 +42,14 @@
 #      regression itself: fail toward action, because a redundant arm is a no-op
 #      while a missed one is an unsupervised fleet.
 #   5. trim_log's size comparison (the reported line) tolerates the same values.
+#   6. An unusable CLOCK is held to the same bar as an unusable mtime: _now
+#      refuses to invent an epoch, _age_since reads the resulting gap as very
+#      old, the stranded-wake poke still fires, and _stamp_now never writes a
+#      fabricated epoch into a marker that is read back by content.
+#   7. Every numeric ENV override goes through the same coercion (_env_int), so
+#      a malformed value falls back instead of aborting the comparison it
+#      configures - including _int_warn's own throttle, which must not turn a
+#      throttled warning into an unbounded stderr flood.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -266,6 +274,157 @@ test_backstop_still_quiet_on_a_fresh_beacon() {
   fi
 }
 
+# --- 4b. the CLOCK half: no invented epochs ---------------------------------
+
+# Stub `date +%s` for one call. A shell function shadows the PATH binary in this
+# shell and every subshell it forks, which is the only way to reproduce a
+# polluted clock read deterministically. Other `date` formats pass through.
+with_stub_clock() {  # <emitted-clock> <fn> [args...]
+  local emitted=$1; shift
+  local rc
+  eval 'date() { case "${1:-}" in +%s) printf "%s" "$FM_TEST_STUB_CLOCK" ;; *) command date "$@" ;; esac; }'
+  FM_TEST_STUB_CLOCK="$emitted" "$@"
+  rc=$?
+  unset -f date
+  return $rc
+}
+
+# The clock gets the same treatment as the mtime, with one difference: there is
+# no safe fallback EPOCH. A fabricated 0 is a 1970 timestamp, and it propagates
+# into ages and into marker files, so _now refuses instead.
+test_now_refuses_to_invent_an_epoch() {
+  local got rc
+  got=$(with_stub_clock "1784687492" _now 2>/dev/null)
+  assert_out "$got" "1784687492" "a clean clock read passes through"
+  got=$(with_stub_clock "$(printf '1784687492\n%s' "$STUCK_BUFFER_LINE")" _now 2>/dev/null)
+  assert_out "$got" "1784687492" "a buffer-polluted clock recovers the real epoch"
+  rc=0
+  got=$(with_stub_clock "wat" _now 2>/dev/null) || rc=$?
+  assert_out "$got" "" "an unusable clock yields no epoch at all"
+  [ "$rc" -ne 0 ] || fail "_now reported success on an unusable clock read"
+  pass "_now: an unusable clock refuses rather than fabricating an epoch"
+}
+
+test_age_since_reads_an_unusable_clock_as_very_old() {
+  local got
+  got=$(with_stub_clock "wat" _age_since 1784687492 'stale-marker:x' 2>/dev/null)
+  assert_out "$got" "999999" "an unusable clock reads as very old, never as fresh"
+  got=$(_age_since "" 'stale-marker:x' 2>/dev/null)
+  assert_out "$got" "999999" "an unreadable stored epoch reads as very old"
+  got=$(with_stub_clock "1000" _age_since "1500" 'stale-marker:x' 2>/dev/null)
+  assert_out "$got" "0" "a future epoch is fresh, never a negative age"
+  pass "_age_since: an unusable epoch or clock biases very old, and never goes negative"
+}
+
+# The stranded-wake poke is the ONLY mechanism that re-invokes the LLM session.
+# With a fabricated epoch of 0 the queue age came out hugely negative and the
+# poke silently never fired - failing toward silence in the exact path this
+# hardening exists to protect.
+test_poke_still_fires_when_the_clock_read_is_unusable() {
+  local state now
+  state=$(new_state poke-badclock)
+  now=$(date +%s)
+  printf '%s\t1\tsignal\tfoo-x1\tfoo-x1 needs-decision\n' "$(( now - 3600 ))" \
+    > "$state/.wake-queue"
+  if with_stub_clock "wat" poke_should_fire "$state" 2>/dev/null; then
+    pass "poke_should_fire: an unusable clock still pokes the stranded session"
+  else
+    fail "poke_should_fire stayed silent on an unusable clock (fails toward silence)"
+  fi
+}
+
+# A garbage FM_POKE_AFTER_SECS must fall back, not abort the comparison and take
+# the whole poke down with it.
+test_poke_survives_garbage_poke_env() {
+  local state now
+  state=$(new_state poke-badenv)
+  now=$(date +%s)
+  printf '%s\t1\tsignal\tfoo-x1\tfoo-x1 needs-decision\n' "$(( now - 3600 ))" \
+    > "$state/.wake-queue"
+  if FM_POKE_AFTER_SECS="  " FM_POKE_MIN_INTERVAL=" x " poke_should_fire "$state" 2>/dev/null; then
+    pass "poke_should_fire: garbage poke thresholds fall back instead of aborting"
+  else
+    fail "garbage poke thresholds suppressed the stranded-wake poke"
+  fi
+}
+
+# Markers that are read back BY CONTENT (the stale marker, the escalation-since
+# sidecar) must never receive a fabricated epoch: it does not merely mislead
+# once, it persists and is believed for as long as the marker lives.
+test_stamp_now_never_writes_a_fabricated_epoch() {
+  local state f rc
+  state=$(new_state stamp-now)
+  f="$state/marker"
+  with_stub_clock "1784687492" _stamp_now "$f" 2>/dev/null \
+    || fail "_stamp_now failed on a clean clock read"
+  assert_out "$(cat "$f")" "1784687492" "a clean clock is stamped verbatim"
+  # The on-disk format stays byte-identical to what `date +%s > marker` wrote.
+  assert_out "$(wc -c < "$f" | tr -d '[:space:]')" "11" "the stamp keeps its trailing newline"
+  rc=0
+  with_stub_clock "wat" _stamp_now "$f" 2>/dev/null || rc=$?
+  [ "$rc" -ne 0 ] || fail "_stamp_now reported success on an unusable clock read"
+  assert_out "$(cat "$f")" "" "an unusable clock truncates rather than fabricating an epoch"
+  # The mtime-only throttles still work off the truncated file, and a content
+  # reader sees the very-old sentinel instead of a believable 1970 timestamp.
+  [ -e "$f" ] || fail "_stamp_now removed the marker instead of truncating it"
+  assert_out "$(_age_since "$(cat "$f")" 'stale-marker:x' 2>/dev/null)" "999999" \
+    "the truncated stamp reads as the sentinel, not as a 1970 epoch"
+  pass "_stamp_now: an unusable clock never persists a fabricated epoch"
+}
+
+# End to end for the same defect: a stale marker recorded under a broken clock
+# must not later escalate a garbage "stale persisted 1784687492s" wedge line.
+test_stale_marker_never_stores_a_fabricated_epoch() {
+  local state marker age
+  state=$(new_state stale-marker-badclock)
+  with_stub_clock "wat" stale_marker_record "sess:fm-foo-x1" "$state" 2>/dev/null || true
+  marker="$state/.subsuper-stale-foo-x1"
+  [ -e "$marker" ] || fail "stale_marker_record wrote no marker at all"
+  assert_no_grep "1970" "$marker" "the marker holds no fabricated epoch"
+  age=$(_age_since "$(cat "$marker" 2>/dev/null || true)" 'stale-marker:foo-x1' 2>/dev/null)
+  assert_out "$age" "999999" "the marker ages to the sentinel, not to ~1.78e9 seconds"
+  pass "stale_marker_record: a broken clock cannot persist a bogus idle-since epoch"
+}
+
+# --- 4c. numeric ENV overrides are coerced like every other input -----------
+
+test_env_int_coerces_malformed_overrides() {
+  local got
+  unset FM_TEST_ENVINT 2>/dev/null || true
+  got=$(_env_int FM_TEST_ENVINT 300 2>/dev/null)
+  assert_out "$got" "300" "an unset override takes the default"
+  got=$(FM_TEST_ENVINT="" _env_int FM_TEST_ENVINT 300 2>/dev/null)
+  assert_out "$got" "300" "an empty override takes the default"
+  got=$(FM_TEST_ENVINT="  " _env_int FM_TEST_ENVINT 300 2>/dev/null)
+  assert_out "$got" "300" "a whitespace-only override takes the default"
+  got=$(FM_TEST_ENVINT=" 45 " _env_int FM_TEST_ENVINT 300 2>/dev/null)
+  assert_out "$got" "45" "a padded override coerces to a bare integer"
+  got=$(FM_TEST_ENVINT="0" _env_int FM_TEST_ENVINT 300 2>/dev/null)
+  assert_out "$got" "0" "zero is a value, not a fallback"
+  got=$(FM_TEST_ENVINT="90s" _env_int FM_TEST_ENVINT 300 2>/dev/null)
+  assert_out "$got" "300" "a unit-suffixed override falls back rather than aborting"
+  pass "_env_int: malformed numeric overrides fall back instead of aborting"
+}
+
+# The warning path must not be able to trip the fault it reports: a malformed
+# FM_INT_WARN_INTERVAL_MIN would make `find -mmin` error out, disengaging the
+# throttle and putting the unbounded stderr flood back.
+test_int_warn_throttle_survives_a_garbage_interval() {
+  local state first second
+  state=$(new_state intwarn-badenv)
+  first="$state/first.err"
+  second="$state/second.err"
+  (
+    FM_DAEMON_WARN_STATE="$state" FM_INT_WARN_INTERVAL_MIN=" x "
+    export FM_DAEMON_WARN_STATE FM_INT_WARN_INTERVAL_MIN
+    _as_int "nope" 0 'throttle-probe' >/dev/null 2>"$first"
+    _as_int "nope" 0 'throttle-probe' >/dev/null 2>"$second"
+  )
+  assert_grep "unreadable numeric value" "$first" "the first occurrence still warns on stderr"
+  [ -s "$second" ] && fail "a garbage warn interval disengaged the stderr throttle"
+  pass "_int_warn: a garbage throttle interval falls back instead of flooding stderr"
+}
+
 # --- 5. trim_log: the reported line -----------------------------------------
 
 # The reported error site fed `[` the raw padded `wc -c` output. Exercise the
@@ -277,7 +436,10 @@ test_trim_log_tolerates_padded_wc_output() {
   err="$dir/trimlog.err"
   # 500 lines is comfortably over a 200-byte cap and over KEEP_LINES=10.
   awk 'BEGIN{for(i=1;i<=500;i++) print "[ts] daemon log line " i}' > "$dir/log"
-  LOG="$dir/log" FM_LOG_MAX_BYTES=200 FM_LOG_KEEP_LINES=10 trim_log 2>"$err"
+  # Subshelled so LOG and the caps cannot reach any later case: the daemon's own
+  # log() would start appending to this scratch log and quietly change what the
+  # warning assertions below observe.
+  ( LOG="$dir/log" FM_LOG_MAX_BYTES=200 FM_LOG_KEEP_LINES=10 trim_log ) 2>"$err"
   assert_no_grep "integer expression expected" "$err" "trim_log ran no aborted comparison"
   lines=$(wc -l < "$dir/log" | tr -d '[:space:]')
   assert_out "$lines" "10" "the oversized log was actually trimmed to KEEP_LINES"
@@ -290,9 +452,23 @@ test_trim_log_survives_garbage_max_env() {
   dir=$(new_state trimlog-badenv)
   err="$dir/trimlog-badenv.err"
   printf 'one line\n' > "$dir/log"
-  LOG="$dir/log" FM_LOG_MAX_BYTES="  " trim_log 2>"$err"
+  ( LOG="$dir/log" FM_LOG_MAX_BYTES="  " trim_log ) 2>"$err"
   assert_no_grep "integer expression expected" "$err" "a garbage cap does not abort trim_log"
   pass "trim_log: a garbage FM_LOG_MAX_BYTES falls back instead of aborting"
+}
+
+# The cap has to ride the housekeeping TICK, not a watcher wake. _int_warn logs
+# every occurrence, away mode's other trim only runs after a wake, and a quiet
+# fleet can be hours from one - so a persistently polluted read would pile up
+# megabytes of daemon log during the very full-disk condition that caused it.
+test_housekeeping_tick_caps_the_daemon_log() {
+  local dir lines
+  dir=$(new_state housekeep-trim)
+  awk 'BEGIN{for(i=1;i<=500;i++) print "[ts] daemon log line " i}' > "$dir/log"
+  ( LOG="$dir/log" FM_LOG_MAX_BYTES=200 FM_LOG_KEEP_LINES=10 housekeeping "$dir" ) >/dev/null 2>&1
+  lines=$(wc -l < "$dir/log" | tr -d '[:space:]')
+  assert_out "$lines" "10" "the housekeeping tick trimmed the oversized daemon log"
+  pass "housekeeping: the tick caps the daemon log without waiting for a wake"
 }
 
 test_as_int_strips_whitespace_padding
@@ -308,7 +484,16 @@ test_backstop_still_arms_when_beacon_read_is_padded
 test_backstop_arms_when_beacon_read_is_unusable
 test_backstop_survives_garbage_grace_env
 test_backstop_still_quiet_on_a_fresh_beacon
+test_now_refuses_to_invent_an_epoch
+test_age_since_reads_an_unusable_clock_as_very_old
+test_poke_still_fires_when_the_clock_read_is_unusable
+test_poke_survives_garbage_poke_env
+test_stamp_now_never_writes_a_fabricated_epoch
+test_stale_marker_never_stores_a_fabricated_epoch
+test_env_int_coerces_malformed_overrides
+test_int_warn_throttle_survives_a_garbage_interval
 test_trim_log_tolerates_padded_wc_output
 test_trim_log_survives_garbage_max_env
+test_housekeeping_tick_caps_the_daemon_log
 
 echo "all fm-daemon-numeric tests passed"
