@@ -57,6 +57,9 @@
 #      wrong, because the action then never fires at all. With an unusable clock
 #      a throttle degrades to a clock-independent tick gate, and both halves of
 #      the invariant are pinned: periodically, never every tick, never zero.
+#      The gate counts IN MEMORY, and the disk-full condition that makes the
+#      clock unreadable is driven here directly (an unwritable state dir), so a
+#      counter or marker on the full disk cannot silence or burst the backstop.
 #   9. No captain-facing line prints the sentinel as a duration. "stale persisted
 #      1784687492s" was the reported nonsense; 999999s is the same class of
 #      fabricated-looking number, so an unmeasurable age is named as unknown.
@@ -476,44 +479,123 @@ SH
   pass "ensure_watcher_backstop: an unusable clock still arms, without an arm burst"
 }
 
-# The wedge re-alarm is the second throttle the sentinel defeated: an ERROR log,
-# a marker rewrite and a tmux flash on every housekeeping tick. It must also stay
-# reachable, so its gate is separate from the max-defer gate on the SAME marker;
-# one shared tick counter would let that gate consume the count and silence the
-# alarm entirely.
-test_wedge_realarm_does_not_spam_on_an_unusable_clock() {
-  local state log i fired
-  state=$(new_state wedge-badclock)
-  log="$state/daemon.log"
-  printf 'buffered item\n' > "$state/.subsuper-escalations"
+# --- 4c-2. the throttle under the FULL DISK that made the clock unreadable ---
+#
+# Nothing the throttle needs may live on that disk. A counter written there is
+# truncated and then not written, so every later read comes back empty, the count
+# pins and the backstop is silenced for good; a marker that cannot be created at
+# all leaves the arm firing on every single tick instead. Disk-full must land on
+# NEITHER, so both halves are driven below against an unwritable state dir with
+# an unusable clock, and both assert the same observable behaviour: the backstop
+# keeps arming, periodically. The assertions are on behaviour, not on any
+# internal file, so they are meaningful against either implementation.
+
+# Drive <ticks> present-mode ticks through the real backstop and count the arms
+# it detached.
+_count_backstop_arms() {  # <state> <ticks> -> arms observed
+  local state=$1 ticks=$2 armlog armbin i n
+  armlog="$TMP_ROOT/$(basename "$state").armed"
+  armbin="$TMP_ROOT/$(basename "$state").arm.sh"
+  mkdir -p "$TMP_ROOT"
+  : > "$armlog"
+  cat > "$armbin" <<SH
+#!/usr/bin/env bash
+echo armed >> "$armlog"
+SH
+  chmod +x "$armbin"
   (
-    LOG="$log"
-    for (( i = 0; i < 24; i++ )); do
-      with_stub_clock "wat" inject_wedge_alarm "$state" 999999
+    FM_WATCH_ARM_BIN="$armbin"
+    for (( i = 0; i < ticks; i++ )); do
+      with_stub_clock "wat" ensure_watcher_backstop "$state" 2>/dev/null
     done
-  ) >/dev/null 2>&1
-  fired=$(grep -c "escalation undelivered" "$log" 2>/dev/null || echo 0)
-  [ "$fired" -gt 0 ] || fail "the wedge alarm never fired under an unusable clock"
-  assert_out "$fired" "2" "the wedge re-alarm fires periodically, not on every tick"
-  pass "inject_wedge_alarm: an unusable clock re-alarms periodically, never every tick"
+  )
+  # The arms are detached (double-forked), so wait for the writes to land.
+  i=0
+  while [ "$i" -lt 30 ] && [ ! -s "$armlog" ]; do sleep 0.1; i=$((i + 1)); done
+  sleep 0.5
+  n=$(grep -c armed "$armlog" 2>/dev/null) || n=0
+  printf '%s' "$n"
 }
 
-# The max-defer gate and the wedge alarm throttle on the same marker. Under an
-# unusable clock they must not share one tick counter, or the outer gate eats
-# the count and the alarm inside it can never fire.
-test_wedge_gates_do_not_consume_each_others_tick_count() {
-  local state marker i outer=0 inner=0
-  state=$(new_state wedge-gate-split)
-  marker="$state/.subsuper-inject-wedged"
-  : > "$marker"
-  for (( i = 0; i < 12; i++ )); do
-    with_stub_clock "wat" throttle_ready "$marker" 300 2>/dev/null && outer=$(( outer + 1 ))
-    with_stub_clock "wat" throttle_ready "$marker" 300 "$marker.alarm.ticks" 2>/dev/null \
-      && inner=$(( inner + 1 ))
-  done
-  assert_out "$outer" "1" "the max-defer gate fired once in its own window"
-  assert_out "$inner" "1" "the wedge alarm gate fired once in its own window"
-  pass "throttle_ready: two gates on one marker keep independent tick counts"
+# Returns 0 when <dir> genuinely refuses writes. Running as root defeats the
+# simulation, and a test that silently passes because it never reproduced the
+# condition is worthless, so the caller reports the skip out loud instead.
+_dir_is_unwritable() {  # <dir>
+  local probe="$1/.write-probe"
+  if : 2>/dev/null > "$probe"; then rm -f "$probe" 2>/dev/null || true; return 1; fi
+  return 0
+}
+
+test_backstop_still_arms_when_the_state_dir_cannot_be_written() {
+  local state fired
+  state=$(new_state backstop-fulldisk-nomarker)
+  fm_write_meta "$state/foo-x1.meta" "window=sess:fm-foo-x1" "kind=ship"
+  chmod 555 "$state"
+  if ! _dir_is_unwritable "$state"; then
+    chmod 755 "$state"
+    pass "ensure_watcher_backstop: unwritable-state case not simulable here (writes still succeed, e.g. running as root)"
+    return 0
+  fi
+  # No throttle marker can be created (_stamp_now's write hits the same wall a
+  # full disk does), so the throttle has nothing on disk to work from at all.
+  fired=$(_count_backstop_arms "$state" 36)
+  chmod 755 "$state"
+  [ "$fired" -gt 1 ] || fail "the backstop armed $fired time(s) in 36 ticks on a full disk (fails toward silence)"
+  [ "$fired" -le 6 ] || fail "the backstop detached $fired arms in 36 ticks on a full disk (the burst)"
+  pass "ensure_watcher_backstop: an uncreatable marker still arms periodically, never every tick"
+}
+
+test_backstop_still_arms_when_the_throttle_counter_cannot_be_written() {
+  local state fired
+  state=$(new_state backstop-fulldisk-marker)
+  fm_write_meta "$state/foo-x1.meta" "window=sess:fm-foo-x1" "kind=ship"
+  # The marker exists from an earlier arm, so this is the other half: the clock
+  # is unreadable, the throttle falls back, and nothing it counts with may need
+  # the disk that is full.
+  : > "$state/.subsuper-last-backstop-arm"
+  chmod 555 "$state"
+  if ! _dir_is_unwritable "$state"; then
+    chmod 755 "$state"
+    pass "ensure_watcher_backstop: unwritable-counter case not simulable here (writes still succeed, e.g. running as root)"
+    return 0
+  fi
+  fired=$(_count_backstop_arms "$state" 36)
+  chmod 755 "$state"
+  [ "$fired" -gt 1 ] || fail "the backstop armed $fired time(s) in 36 ticks with an unwritable throttle counter (fails toward silence)"
+  [ "$fired" -le 6 ] || fail "the backstop detached $fired arms in 36 ticks with an unwritable throttle counter (the burst)"
+  pass "ensure_watcher_backstop: an unwritable throttle counter still arms periodically, never every tick"
+}
+
+# The wedge re-alarm is the second throttle the sentinel defeated: an ERROR log,
+# a marker rewrite and a tmux flash on every housekeeping tick. It is gated in
+# exactly ONE place, housekeeping's max-defer escape, so this drives the REAL
+# nested path (housekeeping calling inject_wedge_alarm) rather than the alarm on
+# its own. With a second gate inside the alarm the two counts multiplied under
+# the tick fallback and the alarm re-fired once per 144 ticks instead of once per
+# 12: twelve times quieter during exactly the disk-full incident it announces.
+test_wedge_realarm_cadence_on_the_real_housekeeping_path() {
+  local state log i fired
+  state=$(new_state wedge-nested)
+  log="$state/daemon.log"
+  printf 'needs-decision: pick A\n' > "$state/.subsuper-escalations"
+  afk_enter "$state"
+  # No .since sidecar, so the buffered age is unmeasurable (the very-old
+  # sentinel), which is past any max-defer window. The supervisor target does not
+  # resolve, so every delivery attempt fails and the alarm path is the one under
+  # test.
+  (
+    LOG="$log"
+    FM_SUPERVISOR_TARGET="fm-no-such-session:99.99"
+    FM_ESCALATE_BATCH_SECS=9999999
+    export FM_MAX_DEFER_SECS=300
+    for (( i = 0; i < 24; i++ )); do
+      with_stub_clock "wat" housekeeping "$state"
+    done
+  ) >/dev/null 2>&1
+  fired=$(grep -c "escalation undelivered" "$log" 2>/dev/null) || fired=0
+  [ "$fired" -gt 0 ] || fail "the wedge alarm never fired under an unusable clock"
+  assert_out "$fired" "2" "the wedge alarm re-fires once per fallback window, not once per window squared"
+  pass "housekeeping: the wedge re-alarm keeps its cadence on the real nested path"
 }
 
 # --- 4d. captain-facing text never prints a sentinel as a duration ----------
@@ -674,8 +756,9 @@ test_stale_marker_never_stores_a_fabricated_epoch
 test_throttle_degrades_to_a_tick_gate_on_an_unusable_clock
 test_throttle_uses_the_wall_clock_when_it_is_readable
 test_backstop_arm_does_not_burst_on_an_unusable_clock
-test_wedge_realarm_does_not_spam_on_an_unusable_clock
-test_wedge_gates_do_not_consume_each_others_tick_count
+test_backstop_still_arms_when_the_state_dir_cannot_be_written
+test_backstop_still_arms_when_the_throttle_counter_cannot_be_written
+test_wedge_realarm_cadence_on_the_real_housekeeping_path
 test_age_phrase_renders_the_sentinel_as_an_explicit_unknown
 test_wedge_alarm_text_carries_no_sentinel_duration
 test_env_int_coerces_malformed_overrides

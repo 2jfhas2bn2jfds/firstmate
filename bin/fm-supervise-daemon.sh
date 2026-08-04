@@ -419,19 +419,35 @@ _measured_file_age() {  # <file> -> age on stdout + status 0, or status 1
 }
 
 # Clock-independent stand-in for a wall-clock throttle: allow the action once
-# every <every-n> calls, counted in a sidecar file. Nothing here reads the
-# clock, so it keeps working in exactly the condition that made the clock
-# unreadable.
-_tick_gate_ready() {  # <gate-file> <every-n>
-  local gate=$1 every=$2 raw n
+# every FM_THROTTLE_FALLBACK_TICKS calls for <gate-key>.
+#
+# The counter lives in a shell VARIABLE, never on disk. The condition that makes
+# the clock unreadable is a full filesystem, so a counter written to that
+# filesystem stops counting in exactly the incident it exists for: the write
+# truncates the file and then fails, every later read comes back empty, the
+# count pins at its first value and the action is silenced for good. A guard
+# whose failure mode is caused by the condition it guards against is not a
+# guard. Every throttle is called straight from the daemon's long-lived loop
+# process and never inside a command substitution, so a variable survives across
+# ticks exactly as a file would have.
+#
+# The FIRST call for a key always fires, so falling back never delays an action's
+# first run; the counter is a countdown to the next firing after that.
+_tick_gate_ready() {  # <gate-key>
+  local key=$1 var n every
+  every=$(_env_int FM_THROTTLE_FALLBACK_TICKS "$THROTTLE_FALLBACK_TICKS_DEFAULT")
   [ "$every" -ge 1 ] || every=1
-  raw=$(cat "$gate" 2>/dev/null || true)
-  [ -n "$raw" ] || raw=0
-  n=$(_as_int "$raw" 0 "tick-gate:${gate##*/}")
-  n=$(( n + 1 ))
-  if [ "$n" -ge "$every" ]; then n=0; fi
-  printf '%s\n' "$n" > "$gate" 2>/dev/null || true
-  [ "$n" -eq 0 ]
+  # bash 3.2 has no associative arrays, so the key is name-mangled into a plain
+  # variable name (every gate keeps its own independent count).
+  var="_FM_TICK_GATE_${key//[^A-Za-z0-9]/_}"
+  n=${!var-}
+  case "$n" in ''|*[!0-9]*) n=0 ;; esac
+  if [ "$n" -le 0 ]; then
+    printf -v "$var" '%s' "$every"
+    return 0
+  fi
+  printf -v "$var" '%s' "$(( n - 1 ))"
+  return 1
 }
 
 # The ONE rate limiter for every periodic action in the daemon: 0 when <marker>
@@ -444,14 +460,20 @@ _tick_gate_ready() {  # <gate-file> <every-n>
 # action again, which is the silent-no-fire outage this daemon exists to end.
 # So an unmeasurable age degrades to the clock-independent tick gate: the action
 # still happens periodically, just on a call count instead of a cadence.
-throttle_ready() {  # <marker> <min-gap-secs> [gate-file]
-  local marker=$1 gap=$2 gate=${3:-${1}.ticks} age
-  [ -e "$marker" ] || return 0
-  if age=$(_measured_file_age "$marker"); then
+#
+# A MISSING marker degrades the same way, rather than firing unconditionally.
+# The marker is missing either because the action has never run (the tick gate's
+# first call fires, so a first run is never delayed) or because _stamp_now could
+# not create it, which on a full disk would otherwise fire the action on every
+# single tick: the mirror of the pinned-counter failure, and the same outage seen
+# from the other side.
+throttle_ready() {  # <marker> <min-gap-secs>
+  local marker=$1 gap=$2 age
+  if [ -e "$marker" ] && age=$(_measured_file_age "$marker"); then
     [ "$age" -ge "$gap" ]
     return
   fi
-  _tick_gate_ready "$gate" "$(_env_int FM_THROTTLE_FALLBACK_TICKS "$THROTTLE_FALLBACK_TICKS_DEFAULT")"
+  _tick_gate_ready "$marker"
 }
 
 _hash_text() {
@@ -715,21 +737,22 @@ escalate_flush() {  # <state>
   return 1
 }
 
-# Raise a loud, rate-limited alarm when escalations cannot be delivered after
-# max-defer (the supervisor pane is genuinely busy/wedged, or the submit's Enter
-# is swallowed). The daemon must NEVER silently wedge: this logs
+# Raise a loud alarm when escalations cannot be delivered after max-defer (the
+# supervisor pane is genuinely busy/wedged, or the submit's Enter is swallowed).
+# The daemon must NEVER silently wedge: this logs
 # an ERROR, drops a durable marker firstmate/recovery can surface, and flashes
 # the supervisor client's status line. Nothing is lost — the buffer and the
 # wake-queue both survive — but the stall stops being invisible.
+#
+# The rate limit lives in ONE place: housekeeping's max-defer escape gate, which
+# is the only caller and which has already proved the same .subsuper-inject-wedged
+# marker is a max-defer window old. A second gate here added nothing on the wall
+# clock path and multiplied the two counts on the tick-gate fallback, so a
+# disk-full incident made the alarm twelve times quieter than intended. An alarm
+# that mutes itself during the incident it announces is not an alarm.
 inject_wedge_alarm() {  # <state> <age-seconds>
   local state=$1 age=$2 marker target
   marker="$state/.subsuper-inject-wedged"
-  # Re-alarm at most once per max-defer window so a long wedge does not spam.
-  # Its own gate file, because housekeeping's max-defer escape throttles on the
-  # SAME marker: sharing one tick counter would let that gate consume the count
-  # and silence this alarm entirely whenever the clock is unreadable.
-  throttle_ready "$marker" "$(_env_int FM_MAX_DEFER_SECS "$MAX_DEFER_SECS_DEFAULT")" \
-    "$marker.alarm.ticks" || return 0
   log "ERROR: away-mode escalation undelivered $(_age_phrase "$age"); inject could not confirm a submit (supervisor pane busy or wedged). Buffer + wake-queue preserved; alarm marker written."
   {
     printf 'fm away-mode inject WEDGED: undelivered %s as of %s\n' "$(_age_phrase "$age")" "$(date '+%Y-%m-%dT%H:%M:%S%z')"
@@ -785,9 +808,9 @@ housekeeping() {  # <state>
   max_defer=$(_env_int FM_MAX_DEFER_SECS "$MAX_DEFER_SECS_DEFAULT")
   if afk_active "$state" && [ "$max_defer" -gt 0 ] && [ -s "$state/.subsuper-escalations" ]; then
     oldest=$(_oldest_line_age "$state/.subsuper-escalations")
-    # Throttle the alarm to once per max-defer window (the wedge marker doubles
-    # as the throttle). A successful flush clears the buffer; a failed one alarms
-    # and waits.
+    # The ONLY throttle on this retry and on the wedge alarm it can raise: once
+    # per max-defer window, with the wedge marker doubling as the throttle.
+    # A successful flush clears the buffer; a failed one alarms and waits.
     if [ "$oldest" -ge "$max_defer" ] \
        && throttle_ready "$state/.subsuper-inject-wedged" "$max_defer"; then
       if escalate_flush "$state"; then
