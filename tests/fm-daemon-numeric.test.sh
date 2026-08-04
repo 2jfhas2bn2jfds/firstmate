@@ -1120,6 +1120,10 @@ _conditional_lines() {  # <body>
 # idiomatic `local v=$(...)` once for exactly that reason: it enumerated the
 # shapes already seen instead of the shapes that exist. Each form is proven
 # caught in test_liveness_decisions_branch_only_on_variables.
+#
+# The single quotes below hold literal shell syntax this detector matches ON,
+# never text meant to expand, so SC2016 is off for the whole function.
+# shellcheck disable=SC2016
 _capture_offenders() {  # <body>
   local body=$1 conds vars v assigns fns hit decl asg_re
   conds=$(_conditional_lines "$body")
@@ -1195,6 +1199,9 @@ test_daemon_fn_harvest_covers_every_definition_form() {
 # harvesting, the conditional match or any branch of the assignment scan ever
 # stops working, this case fails here rather than passing while measuring nothing
 # across the real bodies.
+# The synthetic bodies below are single-quoted on purpose: they carry literal
+# `$(...)` text for the detector to find, so SC2016 is off for this case.
+# shellcheck disable=SC2016
 test_liveness_decisions_branch_only_on_variables() {
   local fn body offenders conds form
   # Each entry is a body written the way `declare -f` renders it, carrying one

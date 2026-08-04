@@ -1490,7 +1490,11 @@ trim_log() {
 # ============================================================================
 
 fm_super_main() {
-  local STATE
+  # Initialised here, not just declared: fm-wake-lib.sh assigns a global STATE
+  # and this file sources it inside a subshell, so a bare `local STATE` leaves
+  # the linter resolving these reads to that subshell write (SC2031). The value
+  # is overwritten on the next line either way.
+  local STATE=""
   _state_root_into STATE
   mkdir -p "$STATE"
   # Where _int_warn keeps its per-context stderr throttle markers. Global (not
