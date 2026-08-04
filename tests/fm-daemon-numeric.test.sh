@@ -46,10 +46,20 @@
 #      refuses to invent an epoch, _age_since reads the resulting gap as very
 #      old, the stranded-wake poke still fires, and _stamp_now never writes a
 #      fabricated epoch into a marker that is read back by content.
-#   7. Every numeric ENV override goes through the same coercion (_env_int), so
-#      a malformed value falls back instead of aborting the comparison it
-#      configures - including _int_warn's own throttle, which must not turn a
-#      throttled warning into an unbounded stderr flood.
+#   7. Every numeric ENV override goes through the same coercion (_env_int, or
+#      _env_secs for the one fractional delay), so a malformed value falls back
+#      instead of aborting the comparison it configures - including _int_warn's
+#      own throttle, which must not turn a throttled warning into an unbounded
+#      stderr flood.
+#   8. A THROTTLE age is NOT a liveness age. The very-old sentinel is correct for
+#      "is the beacon stale?" and wrong for "has enough time passed since the
+#      last arm?", where it fires the action every tick; inverting it is equally
+#      wrong, because the action then never fires at all. With an unusable clock
+#      a throttle degrades to a clock-independent tick gate, and both halves of
+#      the invariant are pinned: periodically, never every tick, never zero.
+#   9. No captain-facing line prints the sentinel as a duration. "stale persisted
+#      1784687492s" was the reported nonsense; 999999s is the same class of
+#      fabricated-looking number, so an unmeasurable age is named as unknown.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -157,12 +167,16 @@ with_stub_mtime() {  # <emitted-mtime> <fn> [args...]
   return $rc
 }
 
+# _file_age reads the clock itself, so sampling `date` in the test and asserting
+# an exact age would flake whenever a second boundary fell between the two
+# samples. Both operands are stubbed instead, which keeps the assertion exact.
 test_file_age_survives_padded_mtime() {
   local state now got
   state=$(new_state age-padded)
   : > "$state/.last-watcher-beat"
-  now=$(date +%s)
-  got=$(with_stub_mtime "  $(( now - 461 ))" _file_age "$state/.last-watcher-beat" 2>/dev/null)
+  now=1784687492
+  got=$(with_stub_clock "$now" \
+          with_stub_mtime "  $(( now - 461 ))" _file_age "$state/.last-watcher-beat" 2>/dev/null)
   assert_out "$got" "461" "a padded mtime still yields the true age"
   pass "_file_age: a whitespace-padded mtime yields a bare integer age"
 }
@@ -172,8 +186,9 @@ test_file_age_survives_polluted_mtime() {
   state=$(new_state age-polluted)
   err="$state/age-polluted.err"
   : > "$state/.last-watcher-beat"
-  now=$(date +%s)
-  got=$(with_stub_mtime "$(printf '%s\n%s' "$(( now - 461 ))" "$STUCK_BUFFER_LINE")" \
+  now=1784687492
+  got=$(with_stub_clock "$now" \
+          with_stub_mtime "$(printf '%s\n%s' "$(( now - 461 ))" "$STUCK_BUFFER_LINE")" \
           _file_age "$state/.last-watcher-beat" 2>"$err")
   assert_out "$got" "461" "a buffer-polluted mtime still yields the true age"
   assert_no_grep "integer expression expected" "$err" "no aborted comparison leaks to stderr"
@@ -386,7 +401,151 @@ test_stale_marker_never_stores_a_fabricated_epoch() {
   pass "stale_marker_record: a broken clock cannot persist a bogus idle-since epoch"
 }
 
-# --- 4c. numeric ENV overrides are coerced like every other input -----------
+# --- 4c. THROTTLES under an unusable clock ----------------------------------
+
+# The very-old sentinel is right for a LIVENESS age and wrong for a THROTTLE
+# age, where "very old" means "go ahead" and the action fires every single tick.
+# Inverting the sentinel is equally wrong: reading the age as just-acted would
+# never fire the action again, which is the silent-no-fire outage this whole
+# hardening exists to end. So an unmeasurable age degrades to a clock-independent
+# tick gate, and the invariant is BOTH directions at once: periodically, never
+# every tick, never zero times.
+test_throttle_degrades_to_a_tick_gate_on_an_unusable_clock() {
+  local state marker i fired=0
+  state=$(new_state throttle-badclock)
+  marker="$state/.subsuper-last-backstop-arm"
+  : > "$marker"
+  # 24 calls at the default 12-tick fallback: exactly 2 firings. Before the
+  # fallback existed this was 24 (the arm burst), and a naive inversion would
+  # have made it 0 (the backstop never arming at all).
+  for (( i = 0; i < 24; i++ )); do
+    if with_stub_clock "wat" throttle_ready "$marker" 30 2>/dev/null; then
+      fired=$(( fired + 1 ))
+    fi
+  done
+  [ "$fired" -gt 0 ] || fail "an unusable clock silenced the throttled action entirely"
+  assert_out "$fired" "2" "an unusable clock fires the action periodically, not every tick"
+  pass "throttle_ready: an unusable clock degrades to a periodic tick gate"
+}
+
+# The wall-clock path is unchanged, and a marker that has never been written
+# still fires at once: a throttle must not delay the FIRST run of an action.
+test_throttle_uses_the_wall_clock_when_it_is_readable() {
+  local state marker
+  state=$(new_state throttle-goodclock)
+  marker="$state/.subsuper-last-backstop-arm"
+  throttle_ready "$marker" 30 2>/dev/null \
+    || fail "an absent marker (action never ran) was throttled"
+  : > "$marker"
+  if with_stub_clock 1784687492 with_stub_mtime 1784687490 \
+       throttle_ready "$marker" 30 2>/dev/null; then
+    fail "a 2-second-old marker passed a 30-second throttle"
+  fi
+  with_stub_clock 1784687492 with_stub_mtime 1784687400 \
+    throttle_ready "$marker" 30 2>/dev/null \
+    || fail "a 92-second-old marker failed a 30-second throttle"
+  pass "throttle_ready: a readable clock still throttles by wall time"
+}
+
+# The backstop is the regression's own path: with work in flight, a stale beacon
+# and an unreadable clock, it must keep arming without detaching an arm on every
+# PRESENT_TICK.
+test_backstop_arm_does_not_burst_on_an_unusable_clock() {
+  local state armlog i fired=0
+  state=$(new_state backstop-badclock-throttle)
+  armlog="$state/arm-invoked"
+  fm_write_meta "$state/foo-x1.meta" "window=sess:fm-foo-x1" "kind=ship"
+  cat > "$state/fake-arm.sh" <<SH
+#!/usr/bin/env bash
+echo armed >> "$armlog"
+SH
+  chmod +x "$state/fake-arm.sh"
+  (
+    FM_WATCH_ARM_BIN="$state/fake-arm.sh"
+    for (( i = 0; i < 24; i++ )); do
+      with_stub_clock "wat" ensure_watcher_backstop "$state" 2>/dev/null
+    done
+  )
+  # The arms are detached (double-forked), so wait for the writes to land.
+  i=0
+  while [ "$i" -lt 30 ] && [ ! -s "$armlog" ]; do sleep 0.1; i=$((i + 1)); done
+  sleep 0.5
+  fired=$(grep -c armed "$armlog" 2>/dev/null || echo 0)
+  [ "$fired" -gt 0 ] || fail "the backstop never armed under an unusable clock (fails toward silence)"
+  [ "$fired" -le 4 ] || fail "the backstop detached $fired arms in 24 ticks (the burst the throttle prevents)"
+  pass "ensure_watcher_backstop: an unusable clock still arms, without an arm burst"
+}
+
+# The wedge re-alarm is the second throttle the sentinel defeated: an ERROR log,
+# a marker rewrite and a tmux flash on every housekeeping tick. It must also stay
+# reachable, so its gate is separate from the max-defer gate on the SAME marker;
+# one shared tick counter would let that gate consume the count and silence the
+# alarm entirely.
+test_wedge_realarm_does_not_spam_on_an_unusable_clock() {
+  local state log i fired
+  state=$(new_state wedge-badclock)
+  log="$state/daemon.log"
+  printf 'buffered item\n' > "$state/.subsuper-escalations"
+  (
+    LOG="$log"
+    for (( i = 0; i < 24; i++ )); do
+      with_stub_clock "wat" inject_wedge_alarm "$state" 999999
+    done
+  ) >/dev/null 2>&1
+  fired=$(grep -c "escalation undelivered" "$log" 2>/dev/null || echo 0)
+  [ "$fired" -gt 0 ] || fail "the wedge alarm never fired under an unusable clock"
+  assert_out "$fired" "2" "the wedge re-alarm fires periodically, not on every tick"
+  pass "inject_wedge_alarm: an unusable clock re-alarms periodically, never every tick"
+}
+
+# The max-defer gate and the wedge alarm throttle on the same marker. Under an
+# unusable clock they must not share one tick counter, or the outer gate eats
+# the count and the alarm inside it can never fire.
+test_wedge_gates_do_not_consume_each_others_tick_count() {
+  local state marker i outer=0 inner=0
+  state=$(new_state wedge-gate-split)
+  marker="$state/.subsuper-inject-wedged"
+  : > "$marker"
+  for (( i = 0; i < 12; i++ )); do
+    with_stub_clock "wat" throttle_ready "$marker" 300 2>/dev/null && outer=$(( outer + 1 ))
+    with_stub_clock "wat" throttle_ready "$marker" 300 "$marker.alarm.ticks" 2>/dev/null \
+      && inner=$(( inner + 1 ))
+  done
+  assert_out "$outer" "1" "the max-defer gate fired once in its own window"
+  assert_out "$inner" "1" "the wedge alarm gate fired once in its own window"
+  pass "throttle_ready: two gates on one marker keep independent tick counts"
+}
+
+# --- 4d. captain-facing text never prints a sentinel as a duration ----------
+
+# "stale persisted 1784687492s" was the pre-fix nonsense the captain called out.
+# 999999s is the same class of fabricated-looking duration, just smaller: it
+# reads exactly like a measurement and would wake the captain for nothing.
+test_age_phrase_renders_the_sentinel_as_an_explicit_unknown() {
+  assert_out "$(_age_phrase 461)" "461s" "a real measurement still prints as a duration"
+  assert_out "$(_age_phrase 0)" "0s" "a zero age still prints as a duration"
+  case "$(_age_phrase 999999)" in
+    *999999*) fail "the very-old sentinel printed as a fabricated-looking duration" ;;
+    *unknown*) : ;;
+    *) fail "the very-old sentinel did not render as an explicit unknown" ;;
+  esac
+  pass "_age_phrase: the sentinel renders as an explicit unknown, never as a duration"
+}
+
+test_wedge_alarm_text_carries_no_sentinel_duration() {
+  local state log marker
+  state=$(new_state wedge-text)
+  log="$state/daemon.log"
+  marker="$state/.subsuper-inject-wedged"
+  printf 'buffered item\n' > "$state/.subsuper-escalations"
+  ( LOG="$log"; inject_wedge_alarm "$state" 999999 ) >/dev/null 2>&1
+  assert_no_grep "999999s" "$log" "the wedge log line printed no fabricated duration"
+  assert_grep "unknown" "$log" "the wedge log line names the duration as unknown"
+  assert_no_grep "999999s" "$marker" "the wedge marker printed no fabricated duration"
+  pass "inject_wedge_alarm: an unmeasurable age is reported as unknown, not as 999999s"
+}
+
+# --- 4e. numeric ENV overrides are coerced like every other input -----------
 
 test_env_int_coerces_malformed_overrides() {
   local got
@@ -404,6 +563,28 @@ test_env_int_coerces_malformed_overrides() {
   got=$(FM_TEST_ENVINT="90s" _env_int FM_TEST_ENVINT 300 2>/dev/null)
   assert_out "$got" "300" "a unit-suffixed override falls back rather than aborting"
   pass "_env_int: malformed numeric overrides fall back instead of aborting"
+}
+
+# One override is fractional seconds, so it cannot go through _as_int (which
+# would reject its own 0.5 default). It must not stay raw either: `sleep` exits
+# immediately on a malformed argument, turning a paced retry into a spin.
+test_env_secs_coerces_malformed_fractional_overrides() {
+  local got
+  unset FM_TEST_ENVSECS 2>/dev/null || true
+  got=$(_env_secs FM_TEST_ENVSECS 0.5 2>/dev/null)
+  assert_out "$got" "0.5" "an unset override takes the fractional default"
+  got=$(FM_TEST_ENVSECS=" 0.25 " _env_secs FM_TEST_ENVSECS 0.5 2>/dev/null)
+  assert_out "$got" "0.25" "a padded fractional override coerces to a bare decimal"
+  got=$(FM_TEST_ENVSECS="2" _env_secs FM_TEST_ENVSECS 0.5 2>/dev/null)
+  assert_out "$got" "2" "a plain integer is a valid delay"
+  got=$(FM_TEST_ENVSECS="0.5s" _env_secs FM_TEST_ENVSECS 0.5 2>/dev/null)
+  assert_out "$got" "0.5" "a unit-suffixed override falls back rather than spinning sleep"
+  got=$(FM_TEST_ENVSECS="1.2.3" _env_secs FM_TEST_ENVSECS 0.5 2>/dev/null)
+  assert_out "$got" "0.5" "a two-dot value falls back rather than spinning sleep"
+  got=$(FM_TEST_ENVSECS="$(printf '0.5\n%s' "$STUCK_BUFFER_LINE")" \
+          _env_secs FM_TEST_ENVSECS 9 2>/dev/null)
+  assert_out "$got" "0.5" "a buffer-polluted override recovers its real first-line value"
+  pass "_env_secs: malformed fractional overrides fall back instead of spinning sleep"
 }
 
 # The warning path must not be able to trip the fault it reports: a malformed
@@ -490,7 +671,15 @@ test_poke_still_fires_when_the_clock_read_is_unusable
 test_poke_survives_garbage_poke_env
 test_stamp_now_never_writes_a_fabricated_epoch
 test_stale_marker_never_stores_a_fabricated_epoch
+test_throttle_degrades_to_a_tick_gate_on_an_unusable_clock
+test_throttle_uses_the_wall_clock_when_it_is_readable
+test_backstop_arm_does_not_burst_on_an_unusable_clock
+test_wedge_realarm_does_not_spam_on_an_unusable_clock
+test_wedge_gates_do_not_consume_each_others_tick_count
+test_age_phrase_renders_the_sentinel_as_an_explicit_unknown
+test_wedge_alarm_text_carries_no_sentinel_duration
 test_env_int_coerces_malformed_overrides
+test_env_secs_coerces_malformed_fractional_overrides
 test_int_warn_throttle_survives_a_garbage_interval
 test_trim_log_tolerates_padded_wc_output
 test_trim_log_survives_garbage_max_env

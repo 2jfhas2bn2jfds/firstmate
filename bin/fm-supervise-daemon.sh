@@ -107,6 +107,10 @@
 #          FM_INT_WARN_INTERVAL_MIN minutes between repeated stderr warnings for
 #                                   the SAME unreadable numeric value; the daemon
 #                                   log records every occurrence (default 10)
+#          FM_THROTTLE_FALLBACK_TICKS calls between two firings of a rate-limited
+#                                   action while the clock is unreadable and
+#                                   wall-clock throttling is impossible
+#                                   (default 12; see throttle_ready)
 #          FM_BUSY_REGEX            OR-ed busy signatures (mirrors fm-watch.sh)
 #          FM_COMPOSER_IDLE_RE      empty-composer regex applied after dim-ghost
 #                                   and structural border stripping (default:
@@ -180,6 +184,12 @@ LOG_KEEP_LINES_DEFAULT=2000
 # Minutes between repeated stderr warnings about the SAME unreadable numeric
 # value (see _int_warn). The daemon log records every occurrence regardless.
 INT_WARN_INTERVAL_MIN_DEFAULT=10
+# Calls between two firings of a rate-limited action while the clock is
+# unreadable, when no wall-clock throttling is possible at all (see
+# throttle_ready). Every tick-gated action in the daemon runs on a cadence
+# between 1s and 15s, so 12 calls keeps the degraded rate within a small factor
+# of the wall-clock cadence it stands in for.
+THROTTLE_FALLBACK_TICKS_DEFAULT=12
 
 # --- always-on (present-mode) liveness tunables -----------------------------
 # These drive the minimal liveness layer the daemon runs while afk is INACTIVE.
@@ -299,13 +309,31 @@ _int_warn() {  # <context> <raw>
 # coercion. An override is just another untrusted numeric input: a stray-quoted
 # entry in a sourced env file feeding a bare `[` aborts the comparison and
 # silently disables the very liveness decision it configures, which is the class
-# of failure this hardening exists to end. Every numeric env read below goes
-# through here, so the hardening is uniform rather than spot-applied.
+# of failure this hardening exists to end. Every integer-valued env read below
+# goes through here, and the one fractional-seconds override goes through
+# _env_secs, so the hardening is uniform rather than spot-applied.
 _env_int() {  # <var-name> <default> -> a bare integer on stdout
   local name=$1 def=$2 raw
   raw=${!name-}
   [ -n "$raw" ] || { printf '%s' "$def"; return; }
   _as_int "$raw" "$def" "$name"
+}
+
+# The one numeric override that is NOT an integer: a sub-second poll delay fed
+# straight to `sleep`. It cannot go through _as_int (which would reject its own
+# 0.5 default), but it must not stay raw either: `sleep` exits immediately on a
+# malformed argument, turning a paced retry into a spin.
+_env_secs() {  # <var-name> <default> -> a bare decimal on stdout
+  local name=$1 def=$2 raw v
+  raw=${!name-}
+  [ -n "$raw" ] || { printf '%s' "$def"; return; }
+  v=${raw%%$'\n'*}                    # first line only, as _as_int does
+  v="${v#"${v%%[![:space:]]*}"}"
+  v="${v%"${v##*[![:space:]]}"}"
+  case "$v" in
+    ''|.|*[!0-9.]*|*.*.*) _int_warn "$name" "$raw"; printf '%s' "$def"; return ;;
+  esac
+  printf '%s' "$v"
 }
 
 # Current epoch seconds as a bare integer, or NOTHING plus a non-zero status
@@ -323,20 +351,37 @@ _now() {
   printf '%s\n' "$v"
 }
 
+# The "very old" sentinel an unmeasurable age reads as. Named because it is a
+# policy, not a magic number: a LIVENESS age (is the beacon stale? is a queued
+# wake stranded?) must fail toward ACTION, and "very old" is what makes it do so.
+# It is deliberately NOT the fallback for a THROTTLE age; see throttle_ready.
+AGE_UNKNOWN=999999
+
 # Seconds elapsed since <epoch-raw>. The ONE place the coerce-both-operands /
 # subtract / clamp-negative sequence lives, so the fallback policy cannot drift
 # between the beacon age, the escalation-buffer age, the stale-marker age and
-# the wake-queue age. An unusable stored epoch or clock reads as the 999999
+# the wake-queue age. An unusable stored epoch or clock reads as the AGE_UNKNOWN
 # "very old" sentinel, so a liveness check built on an age errs toward acting
 # rather than toward doing nothing.
-_age_since() {  # <epoch-raw> [context] -> age in seconds, or 999999
+_age_since() {  # <epoch-raw> [context] -> age in seconds, or AGE_UNKNOWN
   local raw=$1 ctx=${2:-epoch} epoch now age
   epoch=$(_as_int "$raw" '' "$ctx")
   now=$(_now || true)
-  { [ -n "$epoch" ] && [ -n "$now" ]; } || { echo 999999; return; }
+  { [ -n "$epoch" ] && [ -n "$now" ]; } || { echo "$AGE_UNKNOWN"; return; }
   age=$(( now - epoch ))
   [ "$age" -lt 0 ] && age=0   # a future epoch is fresh, never a negative age
   echo "$age"
+}
+
+# Render an age for a human-readable line. The sentinel is not a duration, and
+# printing it as one puts a fabricated-looking number in front of the captain
+# that reads exactly like a measured one; a real measurement still prints as a
+# duration.
+_age_phrase() {  # <age> -> "<n>s" or an explicit unknown
+  case "$1" in
+    "$AGE_UNKNOWN") printf 'for an unknown duration' ;;
+    *) printf '%ss' "$1" ;;
+  esac
 }
 
 # Stamp the current epoch into a marker file. Some markers are read back by
@@ -352,10 +397,61 @@ _stamp_now() {  # <file>
   return 1
 }
 
-_file_age() {  # seconds since mtime; the 999999 sentinel when unknown/missing
+_file_age() {  # seconds since mtime; the AGE_UNKNOWN sentinel when unknown/missing
   local f=$1 m
-  m=$(_stat_file_mtime "$f") || { echo 999999; return; }
+  m=$(_stat_file_mtime "$f") || { echo "$AGE_UNKNOWN"; return; }
   _age_since "$m" "mtime:$f"
+}
+
+# Measured age of <file>, or a NON-ZERO status when the age cannot be measured
+# at all. The difference from _file_age is the whole point: _file_age collapses
+# "unknown" into the very-old sentinel, which is right for a liveness check and
+# wrong for a throttle, so a throttle needs to see "unknown" as unknown.
+_measured_file_age() {  # <file> -> age on stdout + status 0, or status 1
+  local f=$1 m now age
+  m=$(_stat_file_mtime "$f") || return 1
+  m=$(_as_int "$m" '' "mtime:$f")
+  [ -n "$m" ] || return 1
+  now=$(_now) || return 1
+  age=$(( now - m ))
+  [ "$age" -lt 0 ] && age=0
+  printf '%s' "$age"
+}
+
+# Clock-independent stand-in for a wall-clock throttle: allow the action once
+# every <every-n> calls, counted in a sidecar file. Nothing here reads the
+# clock, so it keeps working in exactly the condition that made the clock
+# unreadable.
+_tick_gate_ready() {  # <gate-file> <every-n>
+  local gate=$1 every=$2 raw n
+  [ "$every" -ge 1 ] || every=1
+  raw=$(cat "$gate" 2>/dev/null || true)
+  [ -n "$raw" ] || raw=0
+  n=$(_as_int "$raw" 0 "tick-gate:${gate##*/}")
+  n=$(( n + 1 ))
+  if [ "$n" -ge "$every" ]; then n=0; fi
+  printf '%s\n' "$n" > "$gate" 2>/dev/null || true
+  [ "$n" -eq 0 ]
+}
+
+# The ONE rate limiter for every periodic action in the daemon: 0 when <marker>
+# is old enough (or absent, meaning the action has never run) to act again.
+#
+# Wall clock when the clock is readable. When it is NOT, the daemon cannot
+# throttle by time at all, and BOTH naive fallbacks are wrong: reading the age
+# as very old fires the action every single tick, which is the burst the
+# throttle exists to prevent, while reading it as just-acted never fires the
+# action again, which is the silent-no-fire outage this daemon exists to end.
+# So an unmeasurable age degrades to the clock-independent tick gate: the action
+# still happens periodically, just on a call count instead of a cadence.
+throttle_ready() {  # <marker> <min-gap-secs> [gate-file]
+  local marker=$1 gap=$2 gate=${3:-${1}.ticks} age
+  [ -e "$marker" ] || return 0
+  if age=$(_measured_file_age "$marker"); then
+    [ "$age" -ge "$gap" ]
+    return
+  fi
+  _tick_gate_ready "$gate" "$(_env_int FM_THROTTLE_FALLBACK_TICKS "$THROTTLE_FALLBACK_TICKS_DEFAULT")"
 }
 
 _hash_text() {
@@ -629,24 +725,26 @@ inject_wedge_alarm() {  # <state> <age-seconds>
   local state=$1 age=$2 marker target
   marker="$state/.subsuper-inject-wedged"
   # Re-alarm at most once per max-defer window so a long wedge does not spam.
-  if [ "$(_file_age "$marker")" -lt "$(_env_int FM_MAX_DEFER_SECS "$MAX_DEFER_SECS_DEFAULT")" ]; then
-    return 0
-  fi
-  log "ERROR: away-mode escalation undelivered ${age}s; inject could not confirm a submit (supervisor pane busy or wedged). Buffer + wake-queue preserved; alarm marker written."
+  # Its own gate file, because housekeeping's max-defer escape throttles on the
+  # SAME marker: sharing one tick counter would let that gate consume the count
+  # and silence this alarm entirely whenever the clock is unreadable.
+  throttle_ready "$marker" "$(_env_int FM_MAX_DEFER_SECS "$MAX_DEFER_SECS_DEFAULT")" \
+    "$marker.alarm.ticks" || return 0
+  log "ERROR: away-mode escalation undelivered $(_age_phrase "$age"); inject could not confirm a submit (supervisor pane busy or wedged). Buffer + wake-queue preserved; alarm marker written."
   {
-    printf 'fm away-mode inject WEDGED: %ss undelivered as of %s\n' "$age" "$(date '+%Y-%m-%dT%H:%M:%S%z')"
+    printf 'fm away-mode inject WEDGED: undelivered %s as of %s\n' "$(_age_phrase "$age")" "$(date '+%Y-%m-%dT%H:%M:%S%z')"
     printf 'The supervisor pane could not accept an escalation. Buffered items:\n'
     cat "$state/.subsuper-escalations" 2>/dev/null
   } > "$marker" 2>/dev/null || true
   target="${FM_SUPERVISOR_TARGET:-$FM_SUPERVISOR_TARGET_DEFAULT}"
-  tmux display-message -t "$target" "fm: away-mode escalations WEDGED ${age}s — see $marker" 2>/dev/null || true
+  tmux display-message -t "$target" "fm: away-mode escalations WEDGED $(_age_phrase "$age") - see $marker" 2>/dev/null || true
 }
 
 _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first arrived (sidecar epoch)
   local f=$1 since
-  [ -s "$f" ] || { echo 999999; return; }
+  [ -s "$f" ] || { echo "$AGE_UNKNOWN"; return; }
   since="${f}.since"
-  [ -r "$since" ] || { echo 999999; return; }
+  [ -r "$since" ] || { echo "$AGE_UNKNOWN"; return; }
   _age_since "$(cat "$since" 2>/dev/null || true)" 'escalation-since'
 }
 
@@ -691,9 +789,9 @@ housekeeping() {  # <state>
     # as the throttle). A successful flush clears the buffer; a failed one alarms
     # and waits.
     if [ "$oldest" -ge "$max_defer" ] \
-       && [ "$(_file_age "$state/.subsuper-inject-wedged")" -ge "$max_defer" ]; then
+       && throttle_ready "$state/.subsuper-inject-wedged" "$max_defer"; then
       if escalate_flush "$state"; then
-        log "inject recovered: max-defer flush succeeded after ${oldest}s undelivered"
+        log "inject recovered: max-defer flush succeeded after $(_age_phrase "$oldest") undelivered"
         rm -f "$state/.subsuper-inject-wedged"
       else
         inject_wedge_alarm "$state" "$oldest"
@@ -721,7 +819,7 @@ housekeeping() {  # <state>
     if pane_is_busy "$win"; then
       rm -f "$marker"   # crewmate resumed: benign
     else
-      escalate_add "$state" "stale persisted ${age}s (possible wedge): $win"
+      escalate_add "$state" "stale persisted $(_age_phrase "$age") (possible wedge): $win"
       stale_marker_remove "$win" "$state"
     fi
   done
@@ -730,7 +828,7 @@ housekeeping() {  # <state>
   #     classifier may have missed). Cheap: status files only, no tmux. The
   #     captain-relevant filtering is the shared classifier's
   #     scan_captain_relevant_statuses; the daemon layers its digest dedup on top.
-  if [ "$(_file_age "$state/.subsuper-last-scan")" -ge "$(_env_int FM_HEARTBEAT_SCAN_SECS "$HEARTBEAT_SCAN_SECS_DEFAULT")" ]; then
+  if throttle_ready "$state/.subsuper-last-scan" "$(_env_int FM_HEARTBEAT_SCAN_SECS "$HEARTBEAT_SCAN_SECS_DEFAULT")"; then
     _stamp_now "$state/.subsuper-last-scan"
     local seen
     while IFS="$(printf '\t')" read -r f task last; do
@@ -809,8 +907,8 @@ _inject_marked() {  # <message> <target>
   # via the shared submit primitive. Success = the composer is confirmed EMPTY
   # afterward (the text was consumed). An unconfirmed/unknown pane does NOT count
   # as delivered.
-  retries=${FM_INJECT_CONFIRM_RETRIES:-$INJECT_CONFIRM_RETRIES_DEFAULT}
-  sleep_s=${FM_INJECT_CONFIRM_SLEEP:-$INJECT_CONFIRM_SLEEP_DEFAULT}
+  retries=$(_env_int FM_INJECT_CONFIRM_RETRIES "$INJECT_CONFIRM_RETRIES_DEFAULT")
+  sleep_s=$(_env_secs FM_INJECT_CONFIRM_SLEEP "$INJECT_CONFIRM_SLEEP_DEFAULT")
   verdict=$(fm_tmux_submit_core "$target" "$msg" "$retries" "$sleep_s" "$sleep_s")
   if [ "$verdict" = empty ]; then
     return 0  # Composer cleared → submit confirmed.
@@ -863,8 +961,10 @@ _backstop_should_arm() {  # <state>
   [ "$age" -ge "$grace" ]
 }
 
-# ensure_watcher_backstop: when _backstop_should_arm says so (throttled to one
-# launch per BACKSTOP_ARM_THROTTLE so a stale window does not spawn a burst),
+# ensure_watcher_backstop: when _backstop_should_arm says so (throttled through
+# throttle_ready to one launch per BACKSTOP_ARM_THROTTLE so a stale window does
+# not spawn a burst, and to one launch per FM_THROTTLE_FALLBACK_TICKS ticks when
+# the clock is unreadable and no wall-clock throttling is possible),
 # launch fm-watch-arm.sh DETACHED. The arm blocks on its watcher child, so it is
 # double-forked ( ... & ) inside a subshell that exits immediately: the arm is
 # reparented away from the daemon (no zombie, never waited on) and re-establishes
@@ -877,14 +977,13 @@ _backstop_should_arm() {  # <state>
 # stranded-wake poke, not this, re-invokes the LLM; this only keeps the enqueue
 # machinery and beacon alive.
 ensure_watcher_backstop() {  # <state>
-  local state=$1 age throttle min_gap
+  local state=$1 age min_gap
   _backstop_should_arm "$state" || return 0
-  throttle=$(_file_age "$state/.subsuper-last-backstop-arm")
   min_gap=$(_env_int FM_BACKSTOP_ARM_THROTTLE "$BACKSTOP_ARM_THROTTLE_DEFAULT")
-  [ "$throttle" -ge "$min_gap" ] || return 0
+  throttle_ready "$state/.subsuper-last-backstop-arm" "$min_gap" || return 0
   _stamp_now "$state/.subsuper-last-backstop-arm"
   age=$(_file_age "$state/.last-watcher-beat")
-  log "watcher beacon stale ${age}s with $(_in_flight_count "$state") in flight; launching backstop re-arm"
+  log "watcher beacon stale $(_age_phrase "$age") with $(_in_flight_count "$state") in flight; launching backstop re-arm"
   (
     # shellcheck disable=SC1090,SC1091
     [ -f "$FM_HOME/config/x-mode.env" ] && . "$FM_HOME/config/x-mode.env"
@@ -931,6 +1030,11 @@ _poke_queue_sig() {  # <state>
 #     the same stranded state - only a drain or a new wake re-permits a poke).
 # Pure read of state markers; the pane-busy guard is applied by _inject_marked at
 # send time (and re-checked in poke_session), so this stays a cheap decision.
+# The min-interval throttle deliberately keeps _file_age (and so the very-old
+# sentinel) rather than throttle_ready: the burst guard here is the signature
+# dedupe, which reads no clock at all, so an unreadable clock cannot produce a
+# poke storm - while the poke itself is the one mechanism that re-invokes the
+# LLM session and must never be gated behind a tick count.
 poke_should_fire() {  # <state>
   local state=$1 age throttle sig last_sig
   age=$(_poke_oldest_age "$state")
@@ -1128,11 +1232,16 @@ fm_super_main() {
   local WATCH_ERR="$STATE/.supervise-daemon.watcher.err"
   local LOCK="$STATE/.supervise-daemon.lock"
   local PIDFILE="$STATE/.supervise-daemon.pid"
-  local INJECT_FAIL_SLEEP=${FM_INJECT_FAIL_SLEEP:-$INJECT_FAIL_SLEEP_DEFAULT}
-  local CRASH_THRESHOLD=${FM_CRASH_THRESHOLD:-$CRASH_THRESHOLD_DEFAULT}
-  local CRASH_WINDOW=${FM_CRASH_WINDOW:-$CRASH_WINDOW_DEFAULT}
-  local CRASH_BACKOFF=${FM_CRASH_BACKOFF:-$CRASH_BACKOFF_DEFAULT}
-  local CRASH_NORMAL_SLEEP=${FM_CRASH_NORMAL_SLEEP:-$CRASH_NORMAL_SLEEP_DEFAULT}
+  # Coerced like every other numeric input. These feed both `[` comparisons and
+  # `sleep`, and a malformed value (FM_CRASH_NORMAL_SLEEP=" 5 ") makes `sleep`
+  # exit immediately, turning the watcher-restart path into a tight spin rather
+  # than merely disabling a check.
+  local INJECT_FAIL_SLEEP CRASH_THRESHOLD CRASH_WINDOW CRASH_BACKOFF CRASH_NORMAL_SLEEP
+  INJECT_FAIL_SLEEP=$(_env_int FM_INJECT_FAIL_SLEEP "$INJECT_FAIL_SLEEP_DEFAULT")
+  CRASH_THRESHOLD=$(_env_int FM_CRASH_THRESHOLD "$CRASH_THRESHOLD_DEFAULT")
+  CRASH_WINDOW=$(_env_int FM_CRASH_WINDOW "$CRASH_WINDOW_DEFAULT")
+  CRASH_BACKOFF=$(_env_int FM_CRASH_BACKOFF "$CRASH_BACKOFF_DEFAULT")
+  CRASH_NORMAL_SLEEP=$(_env_int FM_CRASH_NORMAL_SLEEP "$CRASH_NORMAL_SLEEP_DEFAULT")
 
   [ -x "$WATCH" ] || { echo "error: watcher not found or not executable: $WATCH" >&2; exit 1; }
 
@@ -1248,7 +1357,7 @@ fm_super_main() {
     # panes from stale detection, so this cheap pane probe is the only thing that
     # can surface it. It only enqueues a durable wake (no classification), so it
     # is additive to afk behavior; present mode surfaces it via the poke below.
-    if [ "$(_file_age "$STATE/.subsuper-last-secondmate-probe")" -ge "$SECONDMATE_PROBE_TICK" ]; then
+    if throttle_ready "$STATE/.subsuper-last-secondmate-probe" "$SECONDMATE_PROBE_TICK"; then
       _stamp_now "$STATE/.subsuper-last-secondmate-probe"
       secondmate_deadturn_probe "$STATE"
     fi
@@ -1322,7 +1431,7 @@ fm_super_main() {
         if ! is_wake_reason "$reason"; then
           log "watcher non-wake stdout, idling: $reason"
           WATCHER_PID=""
-          sleep "$(_env_int HOUSEKEEPING_TICK "$HOUSEKEEPING_TICK_DEFAULT")"
+          sleep "$HOUSEKEEP_TICK"
           continue
         fi
         log "wake: $reason"
@@ -1338,7 +1447,7 @@ fm_super_main() {
     # enough that batch flushes, stale rechecks, and the catch-all scan fire on
     # cadence. Gating keeps a large fleet cheap between ticks.
     sleep 1
-    if [ "$(_file_age "$STATE/.subsuper-last-housekeep")" -ge "$HOUSEKEEP_TICK" ]; then
+    if throttle_ready "$STATE/.subsuper-last-housekeep" "$HOUSEKEEP_TICK"; then
       _stamp_now "$STATE/.subsuper-last-housekeep"
       housekeeping "$STATE"
     fi
