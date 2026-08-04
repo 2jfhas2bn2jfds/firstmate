@@ -358,18 +358,29 @@ _now() {
 AGE_UNKNOWN=999999
 
 # Seconds elapsed since <epoch-raw>. The ONE place the coerce-both-operands /
-# subtract / clamp-negative sequence lives, so the fallback policy cannot drift
-# between the beacon age, the escalation-buffer age, the stale-marker age and
-# the wake-queue age. An unusable stored epoch or clock reads as the AGE_UNKNOWN
-# "very old" sentinel, so a liveness check built on an age errs toward acting
-# rather than toward doing nothing.
-_age_since() {  # <epoch-raw> [context] -> age in seconds, or AGE_UNKNOWN
-  local raw=$1 ctx=${2:-epoch} epoch now age
+# subtract / clamp-negative sequence lives, so the arithmetic cannot drift
+# between the beacon age, the escalation-buffer age, the stale-marker age, the
+# wake-queue age and the throttle ages. It reports an unmeasurable age as a
+# NON-ZERO status and leaves the FALLBACK POLICY to its callers, because the two
+# policies genuinely differ and must not be shared: _age_since collapses unknown
+# into the very-old sentinel so a liveness check errs toward acting, while
+# _measured_file_age keeps unknown as unknown so a throttle can degrade instead.
+_elapsed_since() {  # <epoch-raw> <context> -> age on stdout + status 0, or status 1
+  local raw=$1 ctx=$2 epoch now age
   epoch=$(_as_int "$raw" '' "$ctx")
-  now=$(_now || true)
-  { [ -n "$epoch" ] && [ -n "$now" ]; } || { echo "$AGE_UNKNOWN"; return; }
+  [ -n "$epoch" ] || return 1
+  now=$(_now) || return 1
   age=$(( now - epoch ))
   [ "$age" -lt 0 ] && age=0   # a future epoch is fresh, never a negative age
+  printf '%s' "$age"
+}
+
+# The LIVENESS reading of an elapsed time: an unusable stored epoch or clock
+# reads as the AGE_UNKNOWN "very old" sentinel, so a check built on an age errs
+# toward acting rather than toward doing nothing.
+_age_since() {  # <epoch-raw> [context] -> age in seconds, or AGE_UNKNOWN
+  local age
+  age=$(_elapsed_since "$1" "${2:-epoch}") || { echo "$AGE_UNKNOWN"; return; }
   echo "$age"
 }
 
@@ -397,25 +408,20 @@ _stamp_now() {  # <file>
   return 1
 }
 
-_file_age() {  # seconds since mtime; the AGE_UNKNOWN sentinel when unknown/missing
-  local f=$1 m
-  m=$(_stat_file_mtime "$f") || { echo "$AGE_UNKNOWN"; return; }
-  _age_since "$m" "mtime:$f"
-}
-
 # Measured age of <file>, or a NON-ZERO status when the age cannot be measured
 # at all. The difference from _file_age is the whole point: _file_age collapses
 # "unknown" into the very-old sentinel, which is right for a liveness check and
 # wrong for a throttle, so a throttle needs to see "unknown" as unknown.
 _measured_file_age() {  # <file> -> age on stdout + status 0, or status 1
-  local f=$1 m now age
+  local f=$1 m
   m=$(_stat_file_mtime "$f") || return 1
-  m=$(_as_int "$m" '' "mtime:$f")
-  [ -n "$m" ] || return 1
-  now=$(_now) || return 1
-  age=$(( now - m ))
-  [ "$age" -lt 0 ] && age=0
-  printf '%s' "$age"
+  _elapsed_since "$m" "mtime:$f"
+}
+
+_file_age() {  # seconds since mtime; the AGE_UNKNOWN sentinel when unknown/missing
+  local age
+  age=$(_measured_file_age "$1") || { echo "$AGE_UNKNOWN"; return; }
+  echo "$age"
 }
 
 # Per-gate throttle state lives in shell VARIABLES, never on disk. The condition
@@ -437,7 +443,8 @@ _throttle_var() {  # <slot> <gate-key> -> variable name
 # from a finished episode would throttle the next one for reasons that have
 # nothing to do with it.
 _throttle_forget() {  # <gate-key>
-  unset "$(_throttle_var TICK "$1")" "$(_throttle_var FIRED "$1")"
+  unset "$(_throttle_var TICK "$1")" "$(_throttle_var FIRED "$1")" \
+        "$(_throttle_var SEEN "$1")"
 }
 
 # End a throttled episode: drop the marker AND the in-memory state keyed to it.
@@ -487,13 +494,26 @@ _tick_gate_ready() {  # <gate-key>
 # outage this daemon exists to end. So an unreadable clock, and only an
 # unreadable clock, degrades to the clock-independent tick gate: the action still
 # happens periodically, just on a call count instead of a cadence.
+#
+# The countdown that gate keeps is dropped when the EPISODE ends, which is the
+# marker going from present to absent, and at no other time. In particular a
+# readable call must not drop it: the pollution that makes the clock unreadable
+# lands in SOME later command substitution, so the real failure is intermittent,
+# and clearing the countdown on every readable tick would let the gate's
+# first-call-always-fires rule fire again on every unreadable one. That is one
+# arm every other tick, the burst, reached from the other side.
 throttle_ready() {  # <marker> <min-gap-secs>
-  local marker=$1 gap=$2 age now last var
+  local marker=$1 gap=$2 age now last var seen_var
+  seen_var=$(_throttle_var SEEN "$marker")
+  if [ -e "$marker" ]; then
+    printf -v "$seen_var" '%s' 1
+  elif [ "${!seen_var-}" = 1 ]; then
+    # The marker this state stands for is gone, so the episode it belongs to is
+    # over. Keyed to the marker rather than to the caller, so a deletion that
+    # does not go through throttle_reset cannot strand a burnt count either.
+    _throttle_forget "$marker"
+  fi
   now=$(_now) || { _tick_gate_ready "$marker"; return; }
-  # The clock is in charge again, so a countdown left by an earlier unreadable
-  # stretch is dead state; keeping it would delay the next fallback's first
-  # firing and throttle readable-clock calls by a count nothing is measuring.
-  unset "$(_throttle_var TICK "$marker")"
   if [ -e "$marker" ] && age=$(_measured_file_age "$marker"); then
     [ "$age" -ge "$gap" ] || return 1
   fi
@@ -855,7 +875,7 @@ housekeeping() {  # <state>
     if [ "$oldest" -ge "$max_defer" ] \
        && throttle_ready "$state/.subsuper-inject-wedged" "$max_defer"; then
       if escalate_flush "$state"; then
-        log "inject recovered: max-defer flush succeeded after $(_age_phrase "$oldest") undelivered"
+        log "inject recovered: max-defer flush succeeded; undelivered $(_age_phrase "$oldest")"
         throttle_reset "$state/.subsuper-inject-wedged"
       else
         inject_wedge_alarm "$state" "$oldest"

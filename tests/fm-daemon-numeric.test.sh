@@ -62,7 +62,12 @@
 #      counter or marker on the full disk cannot silence or burst the backstop.
 #      That fallback is reached ONLY when the clock is unreadable: while it reads,
 #      the throttle is wall time even where the marker cannot be written, and no
-#      count from an unreadable stretch or a finished episode is carried into it.
+#      count from a finished episode is carried into the next one. The real
+#      failure is INTERMITTENT (the buffer lands in some later substitution, not
+#      in all of them), so the fallback's count survives the readable ticks in
+#      between and that alternating shape is driven here too, against both
+#      bounds at once: a throttle test that pins one direction cannot see the
+#      other, which is how this mechanism regressed once per direction.
 #   9. No captain-facing line prints the sentinel as a duration. "stale persisted
 #      1784687492s" was the reported nonsense; 999999s is the same class of
 #      fabricated-looking number, so an unmeasurable age is named as unknown.
@@ -453,30 +458,50 @@ test_throttle_uses_the_wall_clock_when_it_is_readable() {
   pass "throttle_ready: a readable clock still throttles by wall time"
 }
 
-# A stale count is state the wall clock is not measuring, so it must never reach
-# a readable-clock decision. The tick gate is the fallback for an unreadable
-# clock ALONE, and the moment the clock is readable again its countdown is dead:
-# an absent marker then means "never run", which fires at once.
-test_a_readable_clock_is_never_gated_by_a_stale_tick_count() {
+# The fallback countdown is keyed to the EPISODE, which is the marker's life, and
+# both bounds are asserted here because this mechanism has regressed in each
+# direction in turn. It must SURVIVE a readable call (clearing it there lets the
+# gate's first-call-always-fires rule fire again on the next unreadable call,
+# which is the burst) and it must DIE with its marker (carrying it into the next
+# episode delays an alarm for reasons that have nothing to do with that episode).
+test_the_tick_countdown_lives_and_dies_with_its_marker() {
   local state marker
   state=$(new_state throttle-clock-recovers)
   marker="$state/.subsuper-inject-wedged"
   : > "$marker"
-  # Burn one firing under an unusable clock, leaving a countdown outstanding.
+  # Burn the fallback's first firing, leaving a countdown outstanding.
   with_stub_clock "wat" throttle_ready "$marker" 300 2>/dev/null \
     || fail "the first fallback call did not fire"
-  # The episode ends: the marker is cleared and the clock is fine again.
+  # A readable call decides on the wall clock. The marker is fresh, so it is
+  # throttled, and it must leave the countdown exactly as it found it.
+  if with_stub_clock 1784687492 with_stub_mtime 1784687492 \
+       throttle_ready "$marker" 300 2>/dev/null; then
+    fail "a marker stamped this second passed a 300-second throttle"
+  fi
+  if with_stub_clock "wat" throttle_ready "$marker" 300 2>/dev/null; then
+    fail "a readable call cleared the countdown, so the fallback fired again at once"
+  fi
+  # The episode ends with its marker, however the marker goes away: the next
+  # episode must start un-throttled rather than inherit a burnt count.
+  throttle_reset "$marker"
+  with_stub_clock "wat" throttle_ready "$marker" 300 2>/dev/null \
+    || fail "a new episode was gated by the previous episode's tick count"
+  : > "$marker"
+  if with_stub_clock "wat" throttle_ready "$marker" 300 2>/dev/null; then
+    fail "the fallback fired twice in a row inside one episode"
+  fi
   rm -f "$marker"
-  throttle_ready "$marker" 300 2>/dev/null \
-    || fail "a readable clock was gated by a countdown from an unreadable stretch"
-  pass "throttle_ready: a readable clock is never gated by a leftover tick count"
+  with_stub_clock "wat" throttle_ready "$marker" 300 2>/dev/null \
+    || fail "a marker removed outside throttle_reset stranded its countdown"
+  pass "throttle_ready: the tick countdown survives a readable call and dies with its marker"
 }
 
 # Drive <ticks> present-mode ticks through the real backstop and count the arms
 # it detached. <clock> is the stubbed `date +%s` reading, "wat" (unusable) by
-# default; pass a real epoch to drive the same ticks on a readable clock.
+# default; pass a real epoch to drive the same ticks on a readable clock, or
+# "intermittent" to alternate an unusable tick with a readable one.
 _count_backstop_arms() {  # <state> <ticks> [clock] -> arms observed
-  local state=$1 ticks=$2 clock=${3:-wat} armlog armbin i n
+  local state=$1 ticks=$2 clock=${3:-wat} armlog armbin i n tick_clock
   armlog="$TMP_ROOT/$(basename "$state").armed"
   armbin="$TMP_ROOT/$(basename "$state").arm.sh"
   mkdir -p "$TMP_ROOT"
@@ -489,7 +514,14 @@ SH
   (
     FM_WATCH_ARM_BIN="$armbin"
     for (( i = 0; i < ticks; i++ )); do
-      with_stub_clock "$clock" ensure_watcher_backstop "$state" 2>/dev/null
+      tick_clock=$clock
+      # The pollution lands in SOME later command substitution, not in all of
+      # them, so the field failure alternates rather than sticking: the daemon's
+      # own stderr shows the aborts interleaved with ordinary ticks.
+      if [ "$clock" = intermittent ]; then
+        if [ $(( i % 2 )) -eq 0 ]; then tick_clock=wat; else tick_clock=1784687492; fi
+      fi
+      with_stub_clock "$tick_clock" ensure_watcher_backstop "$state" 2>/dev/null
     done
   )
   # The arms are detached (double-forked), so wait for the writes to land.
@@ -514,6 +546,22 @@ test_backstop_arm_does_not_burst_on_an_unusable_clock() {
   [ "$fired" -gt 0 ] || fail "the backstop never armed under an unusable clock (fails toward silence)"
   [ "$fired" -le 4 ] || fail "the backstop detached $fired arms in 24 ticks (the burst the throttle prevents)"
   pass "ensure_watcher_backstop: an unusable clock still arms, without an arm burst"
+}
+
+# An unreadable clock is not a state the daemon sits in cleanly: the undrained
+# buffer is flushed into SOME later command substitution, so _now fails on one
+# tick and reads fine on the next. That is the shape the field produced, and it
+# is the shape that has broken this throttle in both directions in turn, so both
+# bounds are asserted in one case: the backstop must arm at least twice over the
+# run (never toward silence) and nowhere near once per tick (never the burst).
+test_backstop_is_bounded_on_an_intermittent_clock() {
+  local state fired
+  state=$(new_state backstop-intermittent-clock)
+  fm_write_meta "$state/foo-x1.meta" "window=sess:fm-foo-x1" "kind=ship"
+  fired=$(_count_backstop_arms "$state" 36 intermittent)
+  [ "$fired" -gt 1 ] || fail "the backstop armed $fired time(s) in 36 intermittent-clock ticks (fails toward silence)"
+  [ "$fired" -le 6 ] || fail "the backstop detached $fired arms in 36 intermittent-clock ticks (the burst)"
+  pass "ensure_watcher_backstop: an intermittent clock still arms periodically, never every tick"
 }
 
 # --- 4c-2. the throttle under the FULL DISK that made the clock unreadable ---
@@ -833,8 +881,9 @@ test_stamp_now_never_writes_a_fabricated_epoch
 test_stale_marker_never_stores_a_fabricated_epoch
 test_throttle_degrades_to_a_tick_gate_on_an_unusable_clock
 test_throttle_uses_the_wall_clock_when_it_is_readable
-test_a_readable_clock_is_never_gated_by_a_stale_tick_count
+test_the_tick_countdown_lives_and_dies_with_its_marker
 test_backstop_arm_does_not_burst_on_an_unusable_clock
+test_backstop_is_bounded_on_an_intermittent_clock
 test_backstop_still_arms_when_the_state_dir_cannot_be_written
 test_backstop_still_arms_when_the_throttle_counter_cannot_be_written
 test_backstop_throttles_by_time_when_only_the_marker_is_unwritable
