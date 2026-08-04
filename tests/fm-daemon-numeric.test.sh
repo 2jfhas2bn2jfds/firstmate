@@ -67,6 +67,17 @@
 #   9. No captain-facing line prints the sentinel as a duration. "stale persisted
 #      1784687492s" was the reported nonsense; 999999s is the same class of
 #      fabricated-looking number, so an unmeasurable age is named as unknown.
+#  10. The OUTERMOST capture, which is where the reported abort actually landed.
+#      Coercing inside a helper closes nothing on its own: the result still has
+#      to cross a $( ) to be read, and that capture is where the stuck buffer
+#      was recorded arriving. Cases 1-9 all stub a value inside a helper, so not
+#      one of them can see that failure - which is exactly how it survived a
+#      round of hardening. Section 6 below stubs the producers' stdout instead,
+#      and adds the structural half: no numeric comparison in a liveness
+#      decision reads its operand across a substitution.
+#  11. A cadence that feeds `sleep` stays positive. `sleep 0` returns instantly
+#      and `sleep -1` fails, so a non-positive override spins the loop it paces
+#      rather than merely mis-pacing it.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -852,6 +863,204 @@ test_housekeeping_tick_caps_the_daemon_log() {
   pass "housekeeping: the tick caps the daemon log without waiting for a wake"
 }
 
+# --- 6. THE OUTERMOST CAPTURE: the reported line itself ---------------------
+#
+# Everything above stubs a value INSIDE a helper and proves the helper coerces
+# it. That is not where the reported failure happened, and no case above can
+# see the reported failure, which is why it survived a round of hardening.
+#
+# The reported line is `[ "$(_in_flight_count "$state")" -gt 0 ]`, the first
+# line of _backstop_should_arm. The daemon's own stderr recorded the operand
+# that aborted there:
+#   bin/fm-supervise-daemon.sh: line 725: [: ...watcher beacon stale 461s with
+#   3 in flight; launching backstop re-arm
+#   3: integer expression expected
+# The stale log line, then a newline, then "3" - and the log text embedded in it
+# says "with 3 in flight", so that trailing 3 is the counter's OWN real output
+# with the stuck buffer prepended. The value was already clean when the counter
+# printed it; the pollution landed on the CAPTURE. A coercion that returns on
+# stdout cannot close that, because its result has to cross a $( ) to be read.
+#
+# So these cases stub the producer's stdout - the outermost capture's content -
+# and require the decision to survive it. They fail against a daemon whose
+# decisions read their operands through $( ), and pass against one whose
+# decisions read them from variables.
+
+# Replace one function's stdout for the duration of a single call, and restore
+# it afterwards. Used to put the field's exact polluted value on the wire that
+# the pre-fix code captured.
+with_stub_stdout() {  # <fn-name> <emitted-stdout> <fn> [args...]
+  local name=$1 emitted=$2; shift 2
+  local saved rc
+  saved=$(declare -f "$name")
+  eval "$name() { printf '%s' \"\$FM_TEST_STUB_STDOUT\"; }"
+  FM_TEST_STUB_STDOUT="$emitted" "$@"
+  rc=$?
+  eval "$saved"
+  return $rc
+}
+
+# The 2026-07-15 operand, exactly: the stale log line, a newline, and the real
+# in-flight count of 3. Three metas are present too, so the decision is right
+# for the right reason once the capture is gone - the fixed daemon counts them
+# itself instead of reading the stub, and must still arm.
+test_backstop_arms_when_the_in_flight_capture_is_polluted() {
+  local state err i
+  state=$(new_state backstop-outermost)
+  err="$state/backstop-outermost.err"
+  for i in 1 2 3; do
+    fm_write_meta "$state/foo-x$i.meta" "window=sess:fm-foo-x$i" "kind=ship"
+  done
+  # No beacon file at all: the age is the very-old sentinel, so the ONLY thing
+  # that can suppress the arm is an aborted comparison.
+  if with_stub_stdout _in_flight_count "$(printf '%s\n3' "$STUCK_BUFFER_LINE")" \
+       _backstop_should_arm "$state" 2>"$err"; then
+    :
+  else
+    fail "backstop did not arm when the in-flight capture carried the stuck buffer"
+  fi
+  assert_no_grep "integer expression expected" "$err" \
+    "the in-flight comparison ran without aborting"
+  pass "_backstop_should_arm: the reported in-flight operand no longer aborts the decision"
+}
+
+# The same boundary, one operand further along: the beacon age. Pre-fix this was
+# `age=$(_file_age ...)`, so a flush on that capture aborted the grace
+# comparison and returned "no arm needed" on a 59-minute-stale beacon.
+test_backstop_arms_when_the_beacon_age_capture_is_polluted() {
+  local state err
+  state=$(new_state backstop-outermost-age)
+  err="$state/backstop-outermost-age.err"
+  fm_write_meta "$state/foo-x1.meta" "window=sess:fm-foo-x1" "kind=ship"
+  if with_stub_stdout _file_age "$(printf '3540\n%s' "$STUCK_BUFFER_LINE")" \
+       _backstop_should_arm "$state" 2>"$err"; then
+    :
+  else
+    fail "backstop did not arm when the beacon-age capture carried the stuck buffer"
+  fi
+  assert_no_grep "integer expression expected" "$err" \
+    "the grace comparison ran without aborting"
+  pass "_backstop_should_arm: a polluted beacon-age capture no longer aborts the decision"
+}
+
+# And the third operand, the configured grace. Pre-fix this was
+# `grace=$(_env_int ...)`, the right-hand side of the same comparison.
+test_backstop_arms_when_the_grace_capture_is_polluted() {
+  local state err
+  state=$(new_state backstop-outermost-grace)
+  err="$state/backstop-outermost-grace.err"
+  fm_write_meta "$state/foo-x1.meta" "window=sess:fm-foo-x1" "kind=ship"
+  if with_stub_stdout _env_int "$(printf '300\n%s' "$STUCK_BUFFER_LINE")" \
+       _backstop_should_arm "$state" 2>"$err"; then
+    :
+  else
+    fail "backstop did not arm when the grace capture carried the stuck buffer"
+  fi
+  assert_no_grep "integer expression expected" "$err" \
+    "the grace comparison ran without aborting"
+  pass "_backstop_should_arm: a polluted grace capture no longer aborts the decision"
+}
+
+# The stranded-wake poke is the one mechanism that re-invokes the LLM session,
+# so its operands get the same treatment: a polluted queue-age or threshold
+# capture must not turn the poke into silence.
+test_poke_fires_when_its_operand_captures_are_polluted() {
+  local state err now
+  state=$(new_state poke-outermost)
+  err="$state/poke-outermost.err"
+  now=$(date +%s)
+  printf '%s\t1\tsignal\tfoo-x1\tsignal: foo-x1\n' "$(( now - 3600 ))" > "$state/.wake-queue"
+  if with_stub_stdout _env_int "$(printf '120\n%s' "$STUCK_BUFFER_LINE")" \
+       poke_should_fire "$state" 2>"$err"; then
+    :
+  else
+    fail "the stranded-wake poke fell silent when a threshold capture was polluted"
+  fi
+  assert_no_grep "integer expression expected" "$err" \
+    "the poke thresholds compared without aborting"
+  pass "poke_should_fire: polluted threshold captures no longer silence the poke"
+}
+
+# The structural half of the same guarantee, and the half that keeps measuring
+# something once the behavioural cases above can no longer reach the old code
+# path: NO numeric comparison in a liveness decision may read an operand across
+# a command substitution. Arithmetic expansion $(( )) is not a capture and is
+# not matched. The compare count is asserted first as a positive control, so a
+# renamed or gutted decision fails loudly instead of passing vacuously.
+test_liveness_decisions_compare_only_variables() {
+  local fn compares offenders
+  for fn in _backstop_should_arm throttle_ready poke_should_fire handle_wake \
+            housekeeping trim_log; do
+    compares=$(declare -f "$fn" | grep -cE '\-(gt|ge|lt|le|eq|ne) ')
+    [ "$compares" -gt 0 ] \
+      || fail "$fn has no numeric comparison left, so this case measures nothing"
+    offenders=$(declare -f "$fn" | grep -E '\-(gt|ge|lt|le|eq|ne) ' \
+                  | grep -E '\$\([^(]' || true)
+    [ -z "$offenders" ] \
+      || fail "$fn compares a value read across a command substitution: $offenders"
+  done
+  pass "liveness decisions: every numeric operand is read from a variable, not a capture"
+}
+
+# --- 7. a cadence that feeds `sleep` must stay positive ---------------------
+#
+# Integer-ness is not enough for the values that pace the loops. `sleep 0`
+# returns instantly and `sleep -1` fails outright, and either one spins the
+# present-mode loop through ensure_watcher_backstop / poke_session / trim_log
+# continuously. Zero and negative stay meaningful where they DISABLE a feature,
+# so the floor belongs to the cadence read, not to the shared coercion.
+# Driven WITHOUT a subshell: fail() exits, and an exit inside a subshell would
+# leave the case reporting success on a failed assertion.
+test_env_pos_int_floors_non_positive_cadences() {
+  local got
+  unset FM_TEST_CADENCE
+  _env_pos_int_into got FM_TEST_CADENCE 30 2>/dev/null
+  assert_out "$got" "30" "an unset cadence takes its default"
+  FM_TEST_CADENCE=0 _env_pos_int_into got FM_TEST_CADENCE 30 2>/dev/null
+  assert_out "$got" "30" "a zero cadence falls back to the default"
+  [ "$got" -gt 0 ] || fail "a zero cadence produced a non-positive sleep argument"
+  FM_TEST_CADENCE=-1 _env_pos_int_into got FM_TEST_CADENCE 30 2>/dev/null
+  assert_out "$got" "30" "a negative cadence falls back to the default"
+  [ "$got" -gt 0 ] || fail "a negative cadence produced a non-positive sleep argument"
+  FM_TEST_CADENCE="  " _env_pos_int_into got FM_TEST_CADENCE 30 2>/dev/null
+  assert_out "$got" "30" "a malformed cadence falls back to the default"
+  FM_TEST_CADENCE=" 5 " _env_pos_int_into got FM_TEST_CADENCE 30 2>/dev/null
+  assert_out "$got" "5" "a padded positive cadence is honoured"
+  unset FM_TEST_CADENCE
+  pass "_env_pos_int_into: a non-positive cadence cannot reach sleep"
+}
+
+# A non-positive cadence is announced, not silently corrected: the daemon is
+# then pacing itself differently from what the operator configured.
+test_env_pos_int_warns_on_a_non_positive_cadence() {
+  local state err got
+  state=$(new_state cadence-warn)
+  err="$state/cadence.err"
+  FM_TEST_CADENCE=0 _env_pos_int_into got FM_TEST_CADENCE 30 2>"$err"
+  unset FM_TEST_CADENCE
+  assert_grep "unreadable numeric value" "$err" "the non-positive cadence is announced"
+  assert_grep "FM_TEST_CADENCE" "$err" "the warning names the override"
+  pass "_env_pos_int_into: a non-positive cadence falls back loudly"
+}
+
+# The floor is only worth anything if the loops actually read through it, so the
+# five overrides that reach a `sleep` are pinned to the positive-floor form.
+test_sleep_cadences_are_read_through_the_positive_floor() {
+  local var
+  for var in FM_PRESENT_TICK FM_HOUSEKEEPING_TICK FM_SECONDMATE_PROBE_TICK \
+             FM_CRASH_NORMAL_SLEEP FM_CRASH_BACKOFF FM_INJECT_FAIL_SLEEP; do
+    grep -qE "_env_pos_int_into [A-Z_]+ $var " "$DAEMON" \
+      || fail "$var still feeds sleep without a positive floor"
+  done
+  # The two overrides where a non-positive value legitimately DISABLES a feature
+  # must keep reading it literally.
+  for var in FM_ESCALATE_BATCH_SECS FM_MAX_DEFER_SECS; do
+    grep -qE "_env_pos_int_into [A-Za-z_]+ $var " "$DAEMON" \
+      && fail "$var was floored, which would break disabling it with 0"
+  done
+  pass "loop cadences: every sleep-feeding override is read with a positive floor"
+}
+
 test_as_int_strips_whitespace_padding
 test_as_int_keeps_first_line_of_polluted_value
 test_as_int_passes_clean_values_through
@@ -889,5 +1098,13 @@ test_int_warn_throttle_survives_a_garbage_interval
 test_trim_log_tolerates_padded_wc_output
 test_trim_log_survives_garbage_max_env
 test_housekeeping_tick_caps_the_daemon_log
+test_backstop_arms_when_the_in_flight_capture_is_polluted
+test_backstop_arms_when_the_beacon_age_capture_is_polluted
+test_backstop_arms_when_the_grace_capture_is_polluted
+test_poke_fires_when_its_operand_captures_are_polluted
+test_liveness_decisions_compare_only_variables
+test_env_pos_int_floors_non_positive_cadences
+test_env_pos_int_warns_on_a_non_positive_cadence
+test_sleep_cadences_are_read_through_the_positive_floor
 
 echo "all fm-daemon-numeric tests passed"
