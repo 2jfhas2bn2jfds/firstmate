@@ -19,10 +19,13 @@
 #     empty, or present-but-untracked;
 #   - an already-set core.hooksPath is preserved and reported (never clobbered),
 #     including one set in a non-local scope;
-#   - a configured core.hooksPath pointing at a directory that no longer exists
-#     is REPORTED rather than short-circuited past, naming the stale value, since
-#     the short-circuit that would hide it is the same one that stops it ever
-#     being re-evaluated;
+#   - OUR OWN repo-local core.hooksPath pointing at a directory that no longer
+#     exists is REPORTED rather than short-circuited past, naming the stale value,
+#     since the short-circuit that would hide it is the same one that stops it
+#     ever being re-evaluated - while a foreign local value (husky's .husky/_) or
+#     a global one is never reported stale, only preserved-and-warned as a
+#     conflict, because warning there would call a correctly-configured project
+#     broken and suggest a remedy that breaks it;
 #   - an active hook in the repo's real hooks directory blocks the write - a
 #     regular file, a symlinked hook, and a dangling symlink all count as active,
 #     while *.sample scaffolding does not - and the warning names every entry it
@@ -254,18 +257,59 @@ test_reports_stale_hooks_path() {
   out=$(fm_hooks_path_apply "$repo" 2>&1) || fail "silent apply returned non-zero on a stale value"
   [ -z "$out" ] || fail "the stale report must be silent without the report flag, got: $out"
 
-  # An absolute value is checked the same way.
-  git -C "$repo" config --local core.hooksPath "$TMP_ROOT/stale-abs"
-  out=$(fm_hooks_path_apply "$repo" report 2>&1) || fail "apply returned non-zero on a stale absolute value"
-  assert_contains "$out" "$TMP_ROOT/stale-abs" "an absolute stale core.hooksPath was not reported"
-
-  # The control that keeps this honest: create the directory that value names
+  # The control that keeps this honest: restore the directory our value names
   # and the warning stops. The check keys on the target existing, not merely on
   # a value being set, so a blanket "always warn" would fail here.
-  mkdir -p "$TMP_ROOT/stale-abs"
-  out=$(fm_hooks_path_apply "$repo" report 2>&1) || fail "apply returned non-zero on a live absolute value"
+  git -C "$repo" checkout -q 'HEAD^' -- "$HOOK_DIR"
+  [ -d "$repo/$HOOK_DIR" ] || fail "precondition: the hooks dir should be back"
+  out=$(fm_hooks_path_apply "$repo" report 2>&1) || fail "apply returned non-zero on a live value"
   [ -z "$out" ] || fail "a core.hooksPath whose target exists must not be reported stale, got: $out"
   pass "T6c a core.hooksPath pointing at a deleted directory is reported, naming the stale value"
+}
+
+# --- T6d: the staleness check is SCOPED to our own repo-local value -----------
+# Reading an effective value here would call a correctly-configured project
+# broken on every single spawn: husky sets core.hooksPath=.husky/_ and gitignores
+# .husky/_, so a fresh treehouse worktree lacks it until npm install - and the
+# warning's remedy ("corrected or unset") would BREAK that project. A global
+# core.hooksPath is likewise not this worktree's to report. Both must be
+# reported as CONFLICTS (preserve-and-warn, condition 2, which deliberately keeps
+# reading the effective value) and never as stale.
+test_stale_check_is_scoped() {
+  local repo fakehome out
+  repo=$(make_repo_with_hooks "$TMP_ROOT/scope-husky")
+  # Exactly the husky shape: a local value naming a directory that is not here.
+  git -C "$repo" config --local core.hooksPath '.husky/_'
+  [ ! -d "$repo/.husky/_" ] || fail "precondition: the husky dir must not exist"
+
+  out=$(fm_hooks_path_apply "$repo" report 2>&1) || fail "apply returned non-zero on a husky-style value"
+  assert_not_contains "$out" "does not exist" \
+    "a legitimate foreign core.hooksPath was wrongly reported stale, and the suggested remedy would break that project"
+  assert_contains "$out" "different core.hooksPath" "the foreign value was not preserved-and-reported as a conflict"
+  [ "$(hooks_path "$repo")" = '.husky/_' ] || fail "the husky value was clobbered"
+
+  # A GLOBAL value pointing nowhere: never attributed to this worktree either.
+  # Condition 2 must still see it (that scope-crossing read is a separate settled
+  # decision), so the conflict warning is expected and the stale one is not.
+  repo=$(make_repo_with_hooks "$TMP_ROOT/scope-global")
+  fakehome="$TMP_ROOT/scope-global-home"
+  mkdir -p "$fakehome"
+  printf '[core]\n\thooksPath = %s/absent-global-hooks\n' "$fakehome" > "$fakehome/.gitconfig"
+  out=$(
+    export GIT_CONFIG_GLOBAL="$fakehome/.gitconfig" \
+      HOME="$fakehome" XDG_CONFIG_HOME="$fakehome/.config" GIT_CONFIG_NOSYSTEM=1
+    [ -n "$(git -C "$repo" config core.hooksPath)" ] || { printf 'NO_GLOBAL\n'; exit 0; }
+    [ -d "$fakehome/absent-global-hooks" ] && { printf 'GLOBAL_TARGET_EXISTS\n'; exit 0; }
+    fm_hooks_path_apply "$repo" report 2>&1
+  ) || fail "apply returned non-zero with a global core.hooksPath"
+  assert_not_contains "$out" "NO_GLOBAL" "precondition: the fake global core.hooksPath was not visible to git"
+  assert_not_contains "$out" "GLOBAL_TARGET_EXISTS" \
+    "control: the global value's target exists, so nothing was under test"
+  assert_not_contains "$out" "does not exist" \
+    "a global core.hooksPath was wrongly reported as this worktree's stale value"
+  assert_contains "$out" "different core.hooksPath" "condition 2 stopped seeing the global value"
+  [ -z "$(hooks_path "$repo")" ] || fail "a --local write silently defeated the global core.hooksPath"
+  pass "T6d the staleness check ignores foreign and non-local core.hooksPath values"
 }
 
 # --- T7: an active hook in the repo's real hooks dir blocks the write ---------
@@ -489,6 +533,7 @@ test_noop_when_untracked
 test_preserves_existing_local_value
 test_preserves_non_local_scope_value
 test_reports_stale_hooks_path
+test_stale_check_is_scoped
 test_active_legacy_hook_blocks
 test_active_hook_warning_names_every_entry
 test_unresolvable_common_dir_fails_closed

@@ -65,9 +65,9 @@
 #      fail-closed on an older git would disable committed hooks fleet-wide
 #      while being indistinguishable from working.
 #
-# Before any of those three, a configured core.hooksPath is VALIDATED rather
-# than short-circuited past: if it names a directory that does not exist, that
-# is reported. Order matters here, and it is the whole point - condition 1
+# Before any of those three, OUR OWN repo-local core.hooksPath is VALIDATED
+# rather than short-circuited past: if it names a directory that does not exist,
+# that is reported. Order matters here, and it is the whole point - condition 1
 # returns as soon as the hooks directory is missing, so a value left behind
 # after a project drops the directory would be hidden by the same short-circuit
 # that prevents it ever being re-evaluated, and a defect that disables its own
@@ -79,54 +79,107 @@
 # says something is stale without saying what is a mystery, and a mystery
 # warning gets skipped.
 #
+# This check is deliberately SCOPED - to --local, and to a value equal to the
+# committed hooks directory this library writes - and that scoping is what keeps
+# it honest, unlike condition 2 which must keep reading the effective value
+# across every scope. Reading an effective value here would call a
+# correctly-configured project broken: husky legitimately sets
+# core.hooksPath=.husky/_ while .husky/_ is gitignored, so a fresh treehouse
+# worktree lacks it until npm install and every single spawn would warn, with a
+# suggested remedy ("corrected or unset") that would BREAK that project. A
+# core.hooksPath set globally would warn the same way while being wrongly
+# attributed to this worktree's path. Scoping loses nothing the check was for:
+# a project that adopts the committed hooks directory and later drops it is
+# still caught, because that value is ours.
+#
 # The value written is RELATIVE (.githooks), never absolute, and that is a
 # correctness requirement rather than a style choice. git config --local from a
 # linked worktree resolves to the pooled clone's shared common config, so the
 # write is pool-wide: every checkout in that pool sees it. A relative path is
 # re-resolved against each worktree's own working-tree root (verified: it also
 # resolves correctly when git runs from a subdirectory), so each checkout runs
-# its own committed hooks, and a checkout whose branch lacks the directory
-# simply runs no hook - silently, with no error. An absolute path would instead
+# its own committed hooks. That re-resolution is also why a pool-mate checkout
+# whose branch lacks the directory simply runs no hook, silently and with no
+# error, which is correct: nothing is configuring that checkout, and its own
+# spawn will validate it when one happens. The stale check above is not in
+# tension with that - it speaks only about the launch target this call is
+# configuring right now, where "the directory our own value names is not here"
+# is precisely the difference between the committed hooks working and this
+# project's check gate being silently absent. An absolute path would instead
 # pin the whole pool to one crew worktree's copy and break the moment that
 # worktree is torn down.
+#
+# CONTAINMENT - the pool-wide write is not only "each checkout runs its own
+# committed hooks". Because --local lands in the pool's shared common config, it
+# also reaches the projects/<name> PRIMARY checkout, which firstmate operates
+# automatically and unattended (bootstrap fleet-syncs every session, teardown
+# fetches and deletes branches), in the session holding the fleet's credentials
+# and .env. Without a counterweight this write turns a project's committed
+# post-checkout/post-merge/reference-transaction hooks into project code running
+# on a schedule inside firstmate's own automation, where before it only ever ran
+# in a crewmate's worktree. So it ships WITH that counterweight, in the same
+# change: every git call firstmate automation makes goes through fm_git, which
+# disables hooks for that invocation (bin/fm-git-contain-lib.sh). Known
+# boundary, stated rather than papered over: treehouse's own `git worktree add`
+# fires post-checkout from inside the treehouse binary, which a helper in bin/
+# cannot reach - the class is closed for firstmate's own git calls, not
+# treehouse's.
 #
 # Like fm-git-author-lib.sh this is advisory: it always returns 0, because a
 # hook is a safety net and failing to install one must never fail a spawn.
 
+# The non-config git calls here go through fm_git, which disables committed hooks:
+# firstmate automation must never execute repo-committed code (see
+# bin/fm-git-contain-lib.sh). The `git ... config` reads and writes below stay
+# bare, and that is the whole carve-out: `git -c core.hooksPath=/dev/null config
+# core.hooksPath` reports /dev/null, which would make condition 2 below believe
+# every repo already carried a conflicting value and skip the write everywhere.
+# Config reads and writes run no hook, so nothing here is left uncontained.
+# shellcheck source=bin/fm-git-contain-lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-git-contain-lib.sh"
+
 # fm_hooks_path_apply <target-dir> [report-conflict]: set repo-local
 # core.hooksPath in the git repo at <target-dir> when that repo carries a
 # committed hooks directory and nothing would be silently overridden. With a
-# truthy second argument a preserved conflict, a configured value that no longer
-# exists, and a skip that leaves committed hooks not running are reported to
-# stderr, otherwise they are left silently. Never writes global or system
-# config. Always returns 0.
+# truthy second argument a preserved conflict, our own repo-local value pointing
+# at a directory that no longer exists, and a skip that leaves committed hooks
+# not running are reported to stderr, otherwise they are left silently. Never
+# writes global or system config. Always returns 0.
 fm_hooks_path_apply() {
-  local dir=$1 report=${2:-} rel=${FM_HOOKS_DIR:-.githooks} cur target common legacy
+  local dir=$1 report=${2:-} rel=${FM_HOOKS_DIR:-.githooks} cur local_cur target common legacy
 
-  git -C "$dir" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
+  fm_git -C "$dir" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
 
-  # Read the effective value BEFORE condition 1 can short-circuit on the hooks
-  # directory being gone, and validate that it still points at something. A
-  # relative value re-resolves against this worktree's own root, which is what
-  # makes it safe pool-wide and also what makes it silently point at nothing
-  # once the directory stops being checked out here.
-  cur=$(git -C "$dir" config core.hooksPath 2>/dev/null || true)
-  if [ -n "$cur" ]; then
-    case "$cur" in
+  # Validate OUR OWN repo-local value BEFORE condition 1 can short-circuit on
+  # the hooks directory being gone. Scoped to --local AND to a value equal to
+  # $rel: a foreign value is somebody else's correct configuration (husky sets
+  # core.hooksPath=.husky/_ with .husky/_ gitignored, so a fresh worktree lacks
+  # it), and a global one is not this worktree's to report at all - see the
+  # header. A relative value re-resolves against this worktree's own root, which
+  # is what makes it safe pool-wide and also what makes it silently point at
+  # nothing once the directory stops being checked out here.
+  local_cur=$(git -C "$dir" config --local core.hooksPath 2>/dev/null || true)
+  if [ "$local_cur" = "$rel" ]; then
+    case "$rel" in
       '~') target=$HOME ;;
-      '~'/*) target="$HOME/${cur#'~'/}" ;;
-      /*) target=$cur ;;
-      *) target="$dir/$cur" ;;
+      '~'/*) target="$HOME/${rel#'~'/}" ;;
+      /*) target=$rel ;;
+      *) target="$dir/$rel" ;;
     esac
     if [ ! -d "$target" ] && [ -n "$report" ]; then
       printf 'warning: %s has core.hooksPath set to "%s", which does not exist; no committed hook and no check gate runs there until that value is corrected or unset\n' \
-        "$dir" "$cur" >&2
+        "$dir" "$rel" >&2
     fi
   fi
 
+  # Condition 2 reads the EFFECTIVE value across every scope, deliberately: a
+  # core.hooksPath set globally is something a human chose on purpose and a
+  # --local write would silently defeat it.
+  cur=$(git -C "$dir" config core.hooksPath 2>/dev/null || true)
+
   # Condition 1: committed (tracked in this worktree's index) and actually
   # checked out here with at least one file in it.
-  git -C "$dir" ls-files --error-unmatch -- "$rel" >/dev/null 2>&1 || return 0
+  fm_git -C "$dir" ls-files --error-unmatch -- "$rel" >/dev/null 2>&1 || return 0
   [ -d "$dir/$rel" ] || return 0
   [ -n "$(ls -A "$dir/$rel" 2>/dev/null)" ] || return 0
 
@@ -148,7 +201,7 @@ fm_hooks_path_apply() {
   # rather than proceeding blind past the one condition protecting .git/hooks -
   # and says why, since a silent skip here disables committed hooks for every
   # project in the fleet while looking exactly like nothing being wrong.
-  common=$(git -C "$dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
+  common=$(fm_git -C "$dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
   if [ -z "$common" ]; then
     if [ -n "$report" ]; then
       printf 'warning: %s cannot resolve its git common dir (git older than 2.31 has no rev-parse --path-format; any other rev-parse failure lands here too), so the .git/hooks guard cannot answer; not setting core.hooksPath, committed hooks in %s will not run\n' \

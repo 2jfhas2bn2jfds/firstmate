@@ -42,6 +42,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 SECONDMATE_REG="$DATA/secondmates.md"
 # shellcheck source=bin/fm-fleet-home-lib.sh
 . "$SCRIPT_DIR/fm-fleet-home-lib.sh"
+# shellcheck source=bin/fm-git-contain-lib.sh
+. "$SCRIPT_DIR/fm-git-contain-lib.sh"
 # One definition of the secondmate marker, sourced above: the secondmate safety
 # check below and the fleet-register redirection key on the same name, so a rename
 # that missed a copy would split "is this a secondmate home?" between call sites
@@ -68,13 +70,13 @@ MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 
 default_branch() {
   local ref branch
-  ref=$(git -C "$PROJ" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
+  ref=$(fm_git -C "$PROJ" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
   if [ -n "$ref" ]; then
     echo "${ref#origin/}"
     return 0
   fi
   for branch in main master; do
-    if git -C "$PROJ" show-ref --verify --quiet "refs/heads/$branch"; then
+    if fm_git -C "$PROJ" show-ref --verify --quiet "refs/heads/$branch"; then
       echo "$branch"
       return 0
     fi
@@ -121,7 +123,7 @@ pr_is_merged() {
     *) return 1 ;;
   esac
   [ -n "$head" ] || return 1
-  current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
+  current=$(fm_git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
   [ "$current" = "$head" ]
 }
 
@@ -135,17 +137,17 @@ pr_is_merged() {
 content_in_default() {
   local name ref default_tree merged_tree
   name=$(default_branch) || return 1
-  if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
-    git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
+  if fm_git -C "$WT" remote get-url origin >/dev/null 2>&1; then
+    fm_git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
     ref="refs/remotes/origin/$name"
-  elif git -C "$WT" rev-parse --quiet --verify "refs/heads/$name" >/dev/null 2>&1; then
+  elif fm_git -C "$WT" rev-parse --quiet --verify "refs/heads/$name" >/dev/null 2>&1; then
     ref="refs/heads/$name"
   else
     return 1
   fi
-  default_tree=$(git -C "$WT" rev-parse --quiet --verify "$ref^{tree}" 2>/dev/null) || return 1
+  default_tree=$(fm_git -C "$WT" rev-parse --quiet --verify "$ref^{tree}" 2>/dev/null) || return 1
   [ -n "$default_tree" ] || return 1
-  merged_tree=$(git -C "$WT" merge-tree --write-tree "$ref" HEAD 2>/dev/null) || return 1
+  merged_tree=$(fm_git -C "$WT" merge-tree --write-tree "$ref" HEAD 2>/dev/null) || return 1
   merged_tree=$(printf '%s\n' "$merged_tree" | head -1)
   [ "$merged_tree" = "$default_tree" ]
 }
@@ -218,9 +220,9 @@ worktree_registered_for_project() {
   local project=$1 target=$2 abs_target listed line listed_abs
   [ -n "$project" ] || return 1
   [ -d "$project" ] || return 1
-  git -C "$project" rev-parse --git-dir >/dev/null 2>&1 || return 1
+  fm_git -C "$project" rev-parse --git-dir >/dev/null 2>&1 || return 1
   abs_target=$(removal_target_abs_path "$target")
-  listed=$(git -C "$project" -c core.quotePath=false worktree list --porcelain 2>/dev/null) || return 1
+  listed=$(fm_git -C "$project" -c core.quotePath=false worktree list --porcelain 2>/dev/null) || return 1
   while IFS= read -r line; do
     case "$line" in
       worktree\ *)
@@ -516,7 +518,7 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
     fi
   else
     # The fm-spawn hook file is ours, never work product; ignore it in the dirty check.
-    dirty=$(git -C "$WT" status --porcelain 2>/dev/null | grep -vE '^\?\? \.claude/' | head -1 || true)
+    dirty=$(fm_git -C "$WT" status --porcelain 2>/dev/null | grep -vE '^\?\? \.claude/' | head -1 || true)
     # Reachability test: is HEAD reachable from ANY remote-tracking branch? Empty
     # means the work is already pushed (a fork is a remote too, so upstream-
     # contribution PRs pushed to a fork pass here). Non-empty does NOT prove the work
@@ -525,14 +527,14 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
     # drops its remote-tracking ref - so a merged-and-deleted branch trips this test
     # while being fully landed. We therefore treat reachability as a fast accept, not
     # the sole verdict, and fall through to a landed-work check before refusing.
-    unpushed=$(git -C "$WT" log --oneline HEAD --not --remotes -- 2>/dev/null | head -5 || true)
+    unpushed=$(fm_git -C "$WT" log --oneline HEAD --not --remotes -- 2>/dev/null | head -5 || true)
     if [ -n "$unpushed" ] && [ "$MODE" = local-only ]; then
       # local-only ships have no remote in the common case, so the "on a remote"
       # test above is expected to be non-empty. The work is safe once it is merged
       # into the local default branch (firstmate does that merge on the captain's
       # approval). Refuse until then.
       DEFAULT=$(default_branch) || { echo "REFUSED: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master." >&2; exit 1; }
-      unmerged=$(git -C "$WT" log --oneline HEAD --not "$DEFAULT" -- 2>/dev/null | head -5 || true)
+      unmerged=$(fm_git -C "$WT" log --oneline HEAD --not "$DEFAULT" -- 2>/dev/null | head -5 || true)
       if [ -n "$dirty" ] || [ -n "$unmerged" ]; then
         echo "REFUSED: local-only worktree $WT has work not yet merged into $DEFAULT and not on any remote." >&2
         [ -n "$dirty" ] && echo "uncommitted changes present" >&2
@@ -553,7 +555,7 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
       # branch. On a gh lookup error work_is_landed falls back to the content check,
       # and if that is also inconclusive it returns false - so we never silently allow
       # teardown of possibly-unlanded work; only genuinely unlanded work is refused.
-      branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
+      branch=$(fm_git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
       if ! work_is_landed "$branch"; then
         echo "REFUSED: worktree $WT has work not on any remote and not landed." >&2
         printf 'unpushed commits:\n%s\n' "$unpushed" >&2
@@ -566,10 +568,10 @@ fi
 
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
 if [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
-  branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
+  branch=$(fm_git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
   if [ "$branch" != "HEAD" ]; then
-    if git -C "$WT" checkout --detach -q 2>/dev/null; then
-      git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
+    if fm_git -C "$WT" checkout --detach -q 2>/dev/null; then
+      fm_git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
     fi
   fi
   # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.

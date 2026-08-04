@@ -66,6 +66,9 @@
 #   setup step. This makes fm-spawn load-bearing for those hooks: drop the call and they
 #   silently stop applying to every crew worktree. It is conditional and never overrides an
 #   explicitly-set core.hooksPath or an active .git/hooks (see bin/fm-hooks-path-lib.sh).
+#   That write is pool-wide, so it reaches the project's primary checkout too - the one
+#   firstmate drives unattended - which is why every git call firstmate automation makes
+#   goes through fm_git and runs with hooks disabled (bin/fm-git-contain-lib.sh).
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar --why captain:asked [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -106,6 +109,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 SUB_HOME_MARKER="$FM_SECONDMATE_HOME_MARKER"
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"
+# shellcheck source=bin/fm-git-contain-lib.sh
+. "$SCRIPT_DIR/fm-git-contain-lib.sh"
 # shellcheck source=bin/fm-git-author-lib.sh
 . "$SCRIPT_DIR/fm-git-author-lib.sh"
 # shellcheck source=bin/fm-hooks-path-lib.sh
@@ -799,7 +804,7 @@ if [ "$KIND" != secondmate ]; then
   if ! proj_real=$(cd "$PROJ_ABS" 2>/dev/null && pwd -P); then
     proj_real=
   fi
-  wt_top=$(git -C "$WT" rev-parse --show-toplevel 2>/dev/null || true)
+  wt_top=$(fm_git -C "$WT" rev-parse --show-toplevel 2>/dev/null || true)
   wt_top_real=
   if ! wt_top_real=$(cd "$wt_top" 2>/dev/null && pwd -P); then
     wt_top_real=
@@ -816,7 +821,7 @@ fi
 TURNEND="$STATE/$ID.turn-ended"
 exclude_path() {
   local rel=$1 EXCL
-  EXCL=$(git -C "$WT" rev-parse --git-path info/exclude 2>/dev/null || true)
+  EXCL=$(fm_git -C "$WT" rev-parse --git-path info/exclude 2>/dev/null || true)
   [ -n "$EXCL" ] || return 0
   mkdir -p "$(dirname "$EXCL")"
   grep -qxF "$rel" "$EXCL" 2>/dev/null || echo "$rel" >> "$EXCL"
@@ -928,6 +933,14 @@ fm_git_author_apply "$WT" "$CONFIG/git-author" report
 # override) so it can never disable hooks a project already relies on; see
 # bin/fm-hooks-path-lib.sh for the three conditions and why the value written
 # must stay relative. Advisory and never fatal, like the identity above.
+#
+# The write is pool-wide (--local from a linked worktree lands in the pool's
+# shared common config), so it does NOT only mean "each checkout runs its own
+# committed hooks" - it also reaches the projects/<name> primary checkout that
+# firstmate fleet-syncs and tears down unattended. Firstmate's own automated git
+# operations must never execute repo-committed code, so they all go through
+# fm_git, which disables hooks per invocation; that containment lands with this
+# write rather than after it (see bin/fm-git-contain-lib.sh).
 fm_hooks_path_apply "$WT" report
 
 sq_brief=$(shell_quote "$BRIEF")

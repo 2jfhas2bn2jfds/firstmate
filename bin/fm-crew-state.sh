@@ -45,6 +45,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-tmux-lib.sh
 . "$SCRIPT_DIR/fm-tmux-lib.sh"
+# shellcheck source=bin/fm-git-contain-lib.sh
+. "$SCRIPT_DIR/fm-git-contain-lib.sh"
 
 ID=${1:-}
 [ -n "$ID" ] || { echo "usage: fm-crew-state.sh <id>" >&2; exit 2; }
@@ -253,7 +255,7 @@ nm_run_id_for_branch() {  # <branch> <list-output>
 
 # CREW_BRANCH is empty at detached HEAD (a just-spawned crew, or a scout's
 # scratch worktree); with no branch there is no run to attribute to this crew.
-CREW_BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+CREW_BRANCH=$(fm_git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
 
 HAVE_RUN=0
 # Scouts and secondmates never drive a no-mistakes validation of their own
