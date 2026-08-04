@@ -242,18 +242,38 @@ fi
 #     itself the abort; it is the carrier that made the next one fatal here.
 #   - When the disk fills, a bash builtin's output write fails and the undrained
 #     buffer is flushed into a LATER command substitution, so `$(date +%s)` and
-#     `$(wc -c ...)` come back with a stale log line APPENDED:
-#       "1784687492\n[2026-07-15T05:17:47-0300] watcher beacon stale 461s ..."
-#     A multi-line operand aborts both `[` and $(( )).
+#     `$(wc -c ...)` come back with a stale log line spliced in. The SAME
+#     2026-07-15 incident produced BOTH orientations:
+#       APPENDED   "1784687492\n[2026-07-15T05:17:47-0300] watcher beacon ..."
+#       PREPENDED  "[2026-07-15T05:17:47-0300] watcher beacon ...\n3"
+#     A multi-line operand aborts both `[` and $(( )) either way round.
 # That killed the watcher-liveness backstop from 2026-07-15: `[` errored,
 # _backstop_should_arm returned non-zero, and a lapsed watcher chain was never
 # re-armed - for three weeks, silently, because nothing checked.
 #
-# So no comparison consumes a raw value any more. _as_int keeps the FIRST line
-# (the real value under both pollutions), strips surrounding whitespace, and
-# yields a bare integer or falls back LOUDLY. Every fallback in the liveness
-# path is chosen to fail toward ACTION (arm the watcher) rather than toward
-# silence, because a redundant arm is a no-op while a missed one is an outage.
+# So no comparison consumes a raw value any more. _as_int strips surrounding
+# whitespace, keeps the FIRST line, and yields a bare integer or falls back
+# LOUDLY. Be precise about what that first-line rule buys, because two of the
+# three things here are load-bearing and this is the one that is NOT:
+#   1. First-line recovery is a CONVENIENCE and covers the APPENDED orientation
+#      ONLY. Under the prepended orientation the first line is the stale log
+#      line, _as_int rejects it and falls back, so the real value is lost. Do
+#      not rely on this rule to recover a polluted read, and do not treat a
+#      decision as protected because it passes through _as_int.
+#   2. THE FALLBACK DIRECTION is what protects the decision when recovery
+#      fails. Every fallback in the liveness path is chosen to fail toward
+#      ACTION (arm the watcher) rather than toward silence, because a redundant
+#      arm is a no-op while a missed one is an outage. Change a liveness
+#      fallback to a quiet value and the 2026-07-15 outage comes back even
+#      though the coercion is untouched.
+#   3. THE ABSENCE OF COMMAND SUBSTITUTIONS is what prevents the pollution at
+#      the reported site outright. _in_flight_count_into is a pure glob loop
+#      assigning through printf -v with no $( ) anywhere, so that operand
+#      cannot be polluted at all. That is prevention, not recovery, and it is
+#      the strongest of the three.
+# Keep 2 and 3 above all else. Reintroducing a capture into a liveness decision,
+# or pointing a liveness fallback at silence, removes the real protection even
+# if the first-line rule survives intact.
 #
 # Coercing INSIDE the helper is only half of it. A value returned on stdout has
 # to be read back with $( ), and a capture is precisely where the stuck buffer
@@ -350,9 +370,11 @@ _env_int() {  # <var-name> <default> -> a bare integer on stdout
 # busy loop the coercion is here to prevent, arrived by a different door. A
 # non-positive value is therefore a malformed CADENCE and falls back to its
 # documented default, loudly, exactly as an unreadable one does. The floor lives
-# here rather than in _as_int because zero and negative are meaningful for the
-# overrides that use them to DISABLE a feature (FM_ESCALATE_BATCH_SECS,
-# FM_MAX_DEFER_SECS), which must keep reading them literally.
+# here rather than in _as_int because it belongs only to a value that reaches a
+# `sleep`. An override that feeds a comparison and nothing else keeps the plain
+# _env_int_into read, because zero is a meaningful setting there: it disables a
+# feature (FM_ESCALATE_BATCH_SECS, FM_MAX_DEFER_SECS) or lowers a threshold to
+# every tick (FM_SECONDMATE_PROBE_TICK).
 _env_pos_int_into() {  # <outvar> <var-name> <positive-default>
   local __ep_out=$1 __ep_name=$2 __ep_def=$3 __ep_v
   _env_int_into __ep_v "$__ep_name" "$__ep_def"
@@ -1496,16 +1518,21 @@ fm_super_main() {
     WATCHER_PID=$!
   }
 
-  # Loop cadences are read ONCE here, through the POSITIVE-floor form: they feed
-  # both `[` comparisons and `sleep`, and an override that made `sleep` return
-  # at once (0) or fail outright (a negative, or a malformed value) would turn
-  # this into a busy loop calling the whole liveness layer continuously, rather
-  # than merely disabling a check. A non-positive cadence is malformed, so it
+  # Loop cadences are read ONCE here. The two that reach `sleep` go through the
+  # POSITIVE-floor form, because an override that made `sleep` return at once
+  # (0) or fail outright (a negative, or a malformed value) would turn this into
+  # a busy loop calling the whole liveness layer continuously, rather than
+  # merely disabling a check. A non-positive value there is malformed, so it
   # falls back to the documented default, loudly.
+  # FM_SECONDMATE_PROBE_TICK reaches no `sleep` - it is only ever the threshold
+  # in the throttle_ready comparison below - so it keeps the plain integer read,
+  # under the same rule as FM_ESCALATE_BATCH_SECS and FM_MAX_DEFER_SECS: a
+  # threshold of 0 is a meaningful setting (probe on every tick) where a delay
+  # of 0 is not.
   local rc reason PRESENT_TICK SECONDMATE_PROBE_TICK HOUSEKEEP_TICK
   _env_pos_int_into PRESENT_TICK FM_PRESENT_TICK "$PRESENT_TICK_DEFAULT"
   _env_pos_int_into HOUSEKEEP_TICK FM_HOUSEKEEPING_TICK "$HOUSEKEEPING_TICK_DEFAULT"
-  _env_pos_int_into SECONDMATE_PROBE_TICK FM_SECONDMATE_PROBE_TICK "$HOUSEKEEP_TICK"
+  _env_int_into SECONDMATE_PROBE_TICK FM_SECONDMATE_PROBE_TICK "$HOUSEKEEP_TICK"
   while true; do
     # --- secondmate dead-turn probe (BOTH modes, tick-gated) ---------------
     # A dead secondmate turn writes no status and the watcher exempts secondmate

@@ -1057,9 +1057,15 @@ test_liveness_decisions_compare_only_variables() {
 # daemon helper always can offer an _into form, so it must.
 
 # Every function the daemon defines, harvested from the source so a helper added
-# later is covered without editing a list here.
+# later is covered without editing a list here. Leading whitespace is allowed
+# deliberately: the daemon defines _stat_file_mtime indented inside a
+# Darwin/Linux if-block, and an anchor at column 0 silently dropped it, which
+# made this a rule about most functions while claiming to be a rule about all of
+# them. test_daemon_fn_harvest_covers_indented_definitions checks that claim
+# rather than trusting it.
 _daemon_defined_fns() {
-  grep -oE '^[A-Za-z_][A-Za-z0-9_]*\(\)' "$DAEMON" | sed 's/()$//' | sort -u
+  grep -oE '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*\(\)' "$DAEMON" \
+    | sed -e 's/^[[:space:]]*//' -e 's/()$//' | sort -u
 }
 
 # The conditional lines of a `declare -f` body: any `[ ... ]` / `[[ ... ]]` test
@@ -1091,6 +1097,30 @@ _capture_offenders() {  # <body>
     done
   done
   return 0
+}
+
+# The harvest is what makes the rule below a class-closer rather than an
+# instance test, so its completeness claim is checked here instead of asserted.
+# A helper the harvest misses is invisible to the rule: a future liveness
+# decision doing `m=$(_stat_file_mtime ...)` and branching on "$m" would pass
+# while carrying exactly the defect the rule exists to forbid.
+# The positive control is the old column-0 anchor: if it ever stops missing the
+# indented definition, this case is no longer distinguishing the two harvests
+# and would pass while measuring nothing.
+test_daemon_fn_harvest_covers_indented_definitions() {
+  local harvested col0
+  harvested=$(_daemon_defined_fns)
+  col0=$(grep -oE '^[A-Za-z_][A-Za-z0-9_]*\(\)' "$DAEMON" | sed 's/()$//' | sort -u)
+
+  printf '%s\n' "$col0" | grep -qxF _stat_file_mtime \
+    && fail "the column-0 anchor now finds the indented definition, so this case measures nothing"
+  printf '%s\n' "$harvested" | grep -qxF _stat_file_mtime \
+    || fail "_stat_file_mtime is defined indented and the harvest still misses it"
+  printf '%s\n' "$harvested" | grep -qxF _backstop_should_arm \
+    || fail "the harvest lost the unindented definitions it already covered"
+  [ "$(printf '%s\n' "$harvested" | grep -c .)" -gt "$(printf '%s\n' "$col0" | grep -c .)" ] \
+    || fail "the widened harvest is no larger than the column-0 one"
+  pass "daemon fn harvest: indented definitions are covered, so the rule below covers every helper"
 }
 
 # The positive control is the detector itself, driven against two synthetic
@@ -1192,19 +1222,26 @@ test_env_pos_int_warns_on_a_non_positive_cadence() {
 
 # The floor is only worth anything if the loops actually read through it, so the
 # five overrides that reach a `sleep` are pinned to the positive-floor form.
+# Counted deliberately: FM_PRESENT_TICK, FM_HOUSEKEEPING_TICK,
+# FM_CRASH_NORMAL_SLEEP, FM_CRASH_BACKOFF and FM_INJECT_FAIL_SLEEP are five, and
+# FM_SECONDMATE_PROBE_TICK is NOT among them because it only ever feeds the
+# throttle_ready comparison. It is pinned below to the un-floored read instead.
 test_sleep_cadences_are_read_through_the_positive_floor() {
   local var
-  for var in FM_PRESENT_TICK FM_HOUSEKEEPING_TICK FM_SECONDMATE_PROBE_TICK \
+  for var in FM_PRESENT_TICK FM_HOUSEKEEPING_TICK \
              FM_CRASH_NORMAL_SLEEP FM_CRASH_BACKOFF FM_INJECT_FAIL_SLEEP; do
     grep -qE "_env_pos_int_into [A-Z_]+ $var " "$DAEMON" \
       || fail "$var still feeds sleep without a positive floor"
   done
-  # The two overrides where a non-positive value legitimately DISABLES a feature
-  # must keep reading it literally.
-  for var in FM_ESCALATE_BATCH_SECS FM_MAX_DEFER_SECS; do
+  # The overrides whose value only ever reaches a comparison must keep reading
+  # it literally, because 0 is a meaningful setting there: it disables a feature
+  # (the first two) or lowers a threshold to every tick (the probe cadence).
+  for var in FM_ESCALATE_BATCH_SECS FM_MAX_DEFER_SECS FM_SECONDMATE_PROBE_TICK; do
     grep -qE "_env_pos_int_into [A-Za-z_]+ $var " "$DAEMON" \
-      && fail "$var was floored, which would break disabling it with 0"
+      && fail "$var was floored, which would break setting it to 0"
   done
+  grep -qE "_env_int_into [A-Z_]+ FM_SECONDMATE_PROBE_TICK " "$DAEMON" \
+    || fail "FM_SECONDMATE_PROBE_TICK is no longer read as a plain integer"
   pass "loop cadences: every sleep-feeding override is read with a positive floor"
 }
 
@@ -1250,6 +1287,7 @@ test_backstop_arms_when_the_beacon_age_capture_is_polluted
 test_backstop_arms_when_the_grace_capture_is_polluted
 test_poke_fires_when_its_operand_captures_are_polluted
 test_liveness_decisions_compare_only_variables
+test_daemon_fn_harvest_covers_indented_definitions
 test_liveness_decisions_branch_only_on_variables
 test_poke_reads_the_queue_path_without_a_capture
 test_env_pos_int_floors_non_positive_cadences
