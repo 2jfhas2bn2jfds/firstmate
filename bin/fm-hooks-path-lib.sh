@@ -46,7 +46,13 @@
 #   3. The repo's real hooks directory must hold no active hook. Sample files
 #      (*.sample) are git's inert scaffolding and do not count. This is the
 #      condition that directly guards the stated risk: a repo actually using
-#      .git/hooks keeps them and is reported, never quietly overridden.
+#      .git/hooks keeps them and is reported, never quietly overridden. A hook
+#      installed as a symlink counts as active - husky and hand-rolled setups
+#      install hooks that way, and a dangling one counts too, because the write
+#      would override it just as silently either way. This condition also fails
+#      CLOSED: if the repo's real hooks directory cannot be resolved at all, the
+#      write is skipped rather than proceeding unguarded, matching every other
+#      condition here in leaving the repo exactly as it was.
 #
 # The value written is RELATIVE (.githooks), never absolute, and that is a
 # correctness requirement rather than a style choice. git config --local from a
@@ -91,10 +97,14 @@ fm_hooks_path_apply() {
   # Condition 3: no active hook in the repo's real hooks directory that this
   # would override. Resolved from --git-common-dir rather than
   # `rev-parse --git-path hooks`, because that form already honours
-  # core.hooksPath and so cannot report what is being overridden.
+  # core.hooksPath and so cannot report what is being overridden. An
+  # unresolvable common dir (older git without --path-format, or any other
+  # rev-parse failure) leaves this guard unable to answer, so it skips the write
+  # rather than proceeding blind past the one condition protecting .git/hooks.
   common=$(git -C "$dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
-  if [ -n "$common" ] && [ -d "$common/hooks" ]; then
-    legacy=$(find "$common/hooks" -maxdepth 1 -type f ! -name '*.sample' 2>/dev/null | head -n 1)
+  [ -n "$common" ] || return 0
+  if [ -d "$common/hooks" ]; then
+    legacy=$(find "$common/hooks" -maxdepth 1 \( -type f -o -type l \) ! -name '*.sample' 2>/dev/null | head -n 1)
     if [ -n "$legacy" ]; then
       if [ -n "$report" ]; then
         printf 'warning: %s has an active hook in %s (e.g. %s); not setting core.hooksPath, which would silently disable it\n' \
