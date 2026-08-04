@@ -173,12 +173,13 @@ test_poke_no_fire_on_empty_queue() {
 }
 
 test_poke_dedupes_unchanged_queue() {
-  local dir state
+  local dir state sig
   dir=$(make_supercase poke-dedupe); state="$dir/state"
   _write_aged_queue "$state" 200
   # Record the CURRENT signature as already-poked; min-interval disabled so only
   # the signature dedupe can block.
-  _poke_queue_sig "$state" > "$state/.subsuper-poke-sig"
+  _poke_queue_sig_into sig "$state"
+  printf '%s\n' "$sig" > "$state/.subsuper-poke-sig"
   if FM_POKE_MIN_INTERVAL=0 poke_should_fire "$state"; then
     fail "poke re-fired for an unchanged stranded queue"
   else

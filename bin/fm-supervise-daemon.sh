@@ -282,8 +282,12 @@ _as_int_into() {  # <outvar> <raw> <fallback> [context]
   printf -v "$__ai_out" '%s' "$__ai_v"
 }
 
-# The stdout form, kept for the call sites whose value goes into a log line or a
-# message rather than into a comparison. No liveness decision uses it.
+# The stdout form. It has NO production caller: every daemon path reads the
+# _into form, because a value returned on stdout has to cross a $( ) to be used
+# and that capture is the boundary this hardening exists to close. It is kept
+# because the unit tests pin the coercion contract through it, and because it is
+# the shape a reverted call site would take, so the regression cases below have
+# something to stub.
 _as_int() {  # <raw> <fallback> [context] -> a bare integer (or <fallback>) on stdout
   local __asi_v
   _as_int_into __asi_v "$1" "$2" "${3:-value}"
@@ -333,6 +337,7 @@ _env_int_into() {  # <outvar> <var-name> <default>
   _as_int_into "$__ei_out" "$__ei_raw" "$__ei_def" "$__ei_name"
 }
 
+# No production caller, kept for the unit tests, as _as_int explains.
 _env_int() {  # <var-name> <default> -> a bare integer on stdout
   local __evi_v
   _env_int_into __evi_v "$1" "$2"
@@ -379,6 +384,7 @@ _env_secs_into() {  # <outvar> <var-name> <default>
   printf -v "$__es_out" '%s' "$__es_v"
 }
 
+# No production caller, kept for the unit tests, as _as_int explains.
 _env_secs() {  # <var-name> <default> -> a bare decimal on stdout
   local __evs_v
   _env_secs_into __evs_v "$1" "$2"
@@ -400,6 +406,7 @@ _now_into() {  # <outvar> -> status 0 with the epoch assigned, or status 1 with 
   printf -v "$__nw_out" '%s' "$__nw_v"
 }
 
+# No production caller, kept for the unit tests, as _as_int explains.
 _now() {
   local __nws_v
   _now_into __nws_v || return 1
@@ -440,9 +447,7 @@ _age_since_into() {  # <outvar> <epoch-raw> [context]
     || printf -v "$__as_out" '%s' "$AGE_UNKNOWN"
 }
 
-# The stdout form. Like every other one here it is for messages and for the unit
-# tests that pin this contract; a decision reads the _into form, because its
-# result would otherwise have to cross a capture to be compared.
+# No production caller, kept for the unit tests, as _as_int explains.
 _age_since() {  # <epoch-raw> [context] -> age in seconds, or AGE_UNKNOWN
   local __ags_v
   _age_since_into __ags_v "$1" "${2:-epoch}"
@@ -483,6 +488,7 @@ _file_age_into() {  # <outvar> <path> -> seconds since mtime, or the AGE_UNKNOWN
   _age_since_into "$__fa_out" "$__fa_m" "mtime:$__fa_path"
 }
 
+# No production caller, kept for the unit tests, as _as_int explains.
 _file_age() {  # seconds since mtime; the AGE_UNKNOWN sentinel when unknown/missing
   local __fas_v
   _file_age_into __fas_v "$1"
@@ -881,15 +887,23 @@ housekeeping() {  # <state>
   for marker in "$state"/.subsuper-stale-*; do
     [ -e "$marker" ] || continue
     key="${marker##*.subsuper-stale-}"
-    # An unreadable marker reads as very old, so the recheck below still runs;
-    # it escalates only on a live pane probe that confirms the crewmate is idle,
-    # so failing toward action here costs a pane read, never a false wedge.
+    # An unreadable marker reads as very old, so the recheck below still runs.
+    # Say the cost out loud rather than claim there is none: under an unusable
+    # clock _stamp_now truncates this marker, the sentinel clears stale_after on
+    # the very next tick, and a crewmate that stopped its turn seconds ago and
+    # shows no busy signature escalates as a possible wedge roughly
+    # FM_STALE_ESCALATE_SECS early - one the persistence window would have
+    # absorbed. That is deliberate, not accidental. The condition that makes the
+    # clock unreadable is the full disk, which is exactly when a wedge is most
+    # likely and least likely to announce itself, and an early escalation names
+    # its own uncertainty ("possible wedge", "for an unknown duration") while a
+    # suppressed one leaves the captain reading nothing at all.
     marker_raw=$(cat "$marker" 2>/dev/null || true)
     _age_since_into age "$marker_raw" "stale-marker:$key"
     [ "$age" -ge "$stale_after" ] || continue
     # Reconstruct the window name from the key (best-effort: session is unknown,
     # so probe the live fm-* windows for one whose task matches).
-    win=$(window_for_task "$key" 2>/dev/null || true)
+    window_for_task_into win "$key" 2>/dev/null || true
     if [ -z "$win" ]; then
       # Window gone (task torn down): drop the marker, nothing to escalate.
       rm -f "$marker"; continue
@@ -909,11 +923,12 @@ housekeeping() {  # <state>
   _env_int_into scan_gap FM_HEARTBEAT_SCAN_SECS "$HEARTBEAT_SCAN_SECS_DEFAULT"
   if throttle_ready "$state/.subsuper-last-scan" "$scan_gap"; then
     _stamp_now "$state/.subsuper-last-scan"
-    local seen
+    local seen seen_last
     while IFS="$(printf '\t')" read -r f task last; do
       [ -n "$f" ] || continue
       seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
-      [ "$(cat "$seen" 2>/dev/null || true)" = "$last" ] && continue
+      seen_last=$(cat "$seen" 2>/dev/null || true)
+      [ "$seen_last" = "$last" ] && continue
       escalate_add "$state" "$(basename "$f"): $last (catch-all scan)"
       mark_status_seen "$state" "$task" "$last"
     done < <(scan_captain_relevant_statuses "$state")
@@ -923,12 +938,18 @@ housekeeping() {  # <state>
   trim_log
 }
 
-# Find a live fm-* window whose task id matches the given marker key.
-window_for_task() {  # <task-key>
-  local key=$1 w t
-  for w in $(tmux list-windows -a -F '#{session_name}:#{window_name}' 2>/dev/null | grep ':fm-' || true); do
-    t=$(window_to_task "$w")
-    [ "$(_stale_key "$t")" = "$key" ] && { printf '%s' "$w"; return 0; }
+# Find a live fm-* window whose task id matches the given marker key. Assigns
+# into a caller-scope variable: housekeeping branches on emptiness to tell "task
+# torn down" from "task still there", and a polluted capture would read as a live
+# window whose pane probe then fails, turning a benign teardown into a wedge
+# escalation.
+window_for_task_into() {  # <outvar> <task-key>
+  local __wf_out=$1 __wf_key=$2 __wf_w __wf_t __wf_k
+  printf -v "$__wf_out" '%s' ''
+  for __wf_w in $(tmux list-windows -a -F '#{session_name}:#{window_name}' 2>/dev/null | grep ':fm-' || true); do
+    __wf_t=$(window_to_task "$__wf_w")
+    __wf_k=$(_stale_key "$__wf_t")
+    [ "$__wf_k" = "$__wf_key" ] && { printf -v "$__wf_out" '%s' "$__wf_w"; return 0; }
   done
   return 1
 }
@@ -1028,6 +1049,8 @@ _in_flight_count_into() {  # <outvar> <state>
   printf -v "$__ifc_out" '%s' "$__ifc_n"
 }
 
+# No production caller, kept for the unit tests, as _as_int explains. The
+# capture of THIS wrapper is where the 2026-07-15 abort was recorded landing.
 _in_flight_count() {  # <state>
   local __ifcs_v
   _in_flight_count_into __ifcs_v "$1"
@@ -1087,15 +1110,22 @@ ensure_watcher_backstop() {  # <state>
 }
 
 # --- (behavior 3) stranded-wake session poke --------------------------------
-# The durable wake queue path for a given state dir.
-_wake_queue_path() { printf '%s' "$1/.wake-queue"; }
+# The durable wake queue path for a given state dir. Assigns into a caller-scope
+# variable for the same reason every numeric helper does: a path is a value the
+# poke path then BRANCHES on ([ -s ... ]), and a builtin write captured through
+# $( ) is exactly where the stuck buffer was recorded landing. A polluted path
+# would read as an empty queue, and this is the one mechanism that re-invokes the
+# LLM session, so it must never fail toward silence.
+_wake_queue_path_into() {  # <outvar> <state>
+  printf -v "$1" '%s' "$2/.wake-queue"
+}
 
 # Age (seconds) of the OLDEST queued wake, or -1 when the queue is empty/missing.
 # The queue is append-ordered "epoch<TAB>seq<TAB>...", so the first line's epoch
 # is the oldest pending wake.
 _poke_oldest_age_into() {  # <outvar> <state>
   local __po_out=$1 __po_state=$2 __po_queue __po_first __po_epoch
-  __po_queue=$(_wake_queue_path "$__po_state")
+  _wake_queue_path_into __po_queue "$__po_state"
   [ -s "$__po_queue" ] || { printf -v "$__po_out" '%s' -1; return; }
   __po_first=$(head -1 "$__po_queue" 2>/dev/null)
   __po_epoch=${__po_first%%$'\t'*}
@@ -1108,12 +1138,21 @@ _poke_oldest_age_into() {  # <outvar> <state>
 
 # Signature of the current queue content. Changes when a wake is added or the
 # queue drains, which is exactly the "queue drained or a new wake arrived"
-# condition that re-permits a poke.
-_poke_queue_sig() {  # <state>
-  local state=$1 queue
-  queue=$(_wake_queue_path "$state")
-  [ -s "$queue" ] || { printf ''; return; }
-  _hash_text "$(cat "$queue" 2>/dev/null)"
+# condition that re-permits a poke. Assigns into a caller-scope variable because
+# poke_should_fire compares the result, so returning it on stdout would put the
+# dedupe decision back across a capture boundary.
+#
+# The digest read stays a capture because it is an external command with no
+# _into form, and it is the one value here whose pollution is harmless: a
+# polluted digest cannot equal the stored one, so the dedupe re-permits the poke
+# rather than suppressing it. The queue PATH is the value that had to move, since
+# a polluted path reads as an empty queue and silences the poke outright.
+_poke_queue_sig_into() {  # <outvar> <state>
+  local __pq_out=$1 __pq_state=$2 __pq_queue __pq_sig
+  _wake_queue_path_into __pq_queue "$__pq_state"
+  [ -s "$__pq_queue" ] || { printf -v "$__pq_out" '%s' ''; return; }
+  __pq_sig=$(_hash_text "$(cat "$__pq_queue" 2>/dev/null)")
+  printf -v "$__pq_out" '%s' "$__pq_sig"
 }
 
 # poke_should_fire: 0 if a stranded-wake poke is warranted right now:
@@ -1137,7 +1176,7 @@ poke_should_fire() {  # <state>
   _file_age_into throttle "$state/.subsuper-poke-sig"
   _env_int_into min_interval FM_POKE_MIN_INTERVAL "$POKE_MIN_INTERVAL_DEFAULT"
   [ "$throttle" -ge "$min_interval" ] || return 1
-  sig=$(_poke_queue_sig "$state")
+  _poke_queue_sig_into sig "$state"
   last_sig=$(cat "$state/.subsuper-poke-sig" 2>/dev/null || true)
   [ "$sig" != "$last_sig" ]
 }
@@ -1150,14 +1189,16 @@ poke_should_fire() {  # <state>
 # min-interval throttle) only on a confirmed submit, so a deferred/busy attempt is
 # retried on the next tick rather than silently marked done.
 poke_session() {  # <state>
-  local state=$1 target n msg
+  local state=$1 target queue n msg sig
   poke_should_fire "$state" || return 0
   target="${FM_SUPERVISOR_TARGET:-$FM_SUPERVISOR_TARGET_DEFAULT}"
-  n=$(wc -l < "$(_wake_queue_path "$state")" 2>/dev/null | tr -d '[:space:]')
+  _wake_queue_path_into queue "$state"
+  n=$(wc -l < "$queue" 2>/dev/null | tr -d '[:space:]')
   case "$n" in ''|*[!0-9]*) n=1 ;; esac
   msg="Supervision liveness: ${n} wake(s) have sat unhandled in state/.wake-queue with no active turn. Drain them now (bin/fm-wake-drain.sh), handle each, then re-arm the watcher (bin/fm-watch-arm.sh)."
   if _inject_marked "$msg" "$target"; then
-    _poke_queue_sig "$state" > "$state/.subsuper-poke-sig"
+    _poke_queue_sig_into sig "$state"
+    printf '%s\n' "$sig" > "$state/.subsuper-poke-sig"
     log "poke sent: ${n} stranded wake(s) in queue"
   else
     log "poke deferred: pane busy/pending or submit unconfirmed"

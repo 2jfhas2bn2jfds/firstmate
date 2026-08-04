@@ -78,6 +78,34 @@
 #  11. A cadence that feeds `sleep` stays positive. `sleep 0` returns instantly
 #      and `sleep -1` fails, so a non-positive override spins the loop it paces
 #      rather than merely mis-pacing it.
+#
+# HOW THESE CASES ARE TIERED, and why the structural ones are the better guard.
+#
+# A stubbing case proves a decision survives one specific polluted value. It is
+# only as good as its stub being REACHED, and a stub is defeated by the code
+# under test simply not calling the stubbed function - which is exactly what
+# happened here: the first round of hardening moved every call site onto the
+# _into helpers, so the three with_stub_stdout cases in section 6 now stub
+# functions the daemon never calls. They still discriminate the pre-fix shape
+# from the fixed one, which is real regression value, but they are NOT ongoing
+# proof that the _into path is pollution-proof, and their comments say so.
+#
+# A structural case asserts a rule about the SHAPE of the code, read back with
+# `declare -f`, and that cannot be defeated the same way: there is no call site
+# to miss, because the rule IS about the call sites. "No liveness decision reads
+# a branched-on value across a command substitution" is close to making the
+# defect impossible rather than testing one instance of it, and each structural
+# case carries a positive control (a compare count, or a synthetic body the
+# detector must flag) so it fails loudly instead of passing while measuring
+# nothing. Prefer keeping and widening these over adding more stubbing cases.
+#
+# What the structural rule does NOT cover, stated so the gap is not mistaken for
+# coverage: a captured value that reaches a conditional only through a parameter
+# expansion. handle_wake's `decision=$(classify_signal ...)` is the live example
+# - it branches on `${decision%%|*}`, not on `decision` - and closing it means
+# giving the five classifiers _into forms, which is a refactor of code this
+# incident did not touch and which the daemon's own tests pin through its stdout
+# contract. It is a known residual, not a covered case.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -885,6 +913,15 @@ test_housekeeping_tick_caps_the_daemon_log() {
 # and require the decision to survive it. They fail against a daemon whose
 # decisions read their operands through $( ), and pass against one whose
 # decisions read them from variables.
+#
+# READ THIS BEFORE TRUSTING THEM AS ONGOING PROOF. They stub the STDOUT wrappers
+# (_in_flight_count, _file_age, _env_int), and the fixed daemon calls the _into
+# forms, so against the current implementation the stub is never reached and the
+# case passes for a reason unrelated to it. That is not a flaw to delete: these
+# are REGRESSION guards, and reverting any of these call sites to the stdout
+# shape is precisely what they discriminate. They are simply not evidence that
+# the _into path is pollution-proof. The structural case at the end of this
+# section is what keeps measuring that, for the reason the file header gives.
 
 # Replace one function's stdout for the duration of a single call, and restore
 # it afterwards. Used to put the field's exact polluted value on the wire that
@@ -1002,6 +1039,116 @@ test_liveness_decisions_compare_only_variables() {
   pass "liveness decisions: every numeric operand is read from a variable, not a capture"
 }
 
+# --- the same rule, widened past numbers ------------------------------------
+#
+# The numeric case above inspects `-gt`/`-ge`/... operands only, which is why it
+# did not see the next instance of its own defect: _poke_oldest_age_into read the
+# wake-queue PATH across a capture and branched on it with `[ -s ... ]`. A
+# polluted path reads as an empty queue, the function returns -1, poke_should_fire
+# returns non-zero, and the one mechanism that re-invokes the LLM session falls
+# silent. Same boundary, same producer shape (a bash builtin's write), different
+# operand type - so the rule has to be about branching, not about arithmetic.
+#
+# THE RULE. In a liveness-decision function, no value a conditional reads may
+# come from capturing a DAEMON-DEFINED function, whether inline inside the test
+# or through a variable assigned from such a capture. External commands (cat, wc,
+# head, stat, tmux) stay captures because they cannot be anything else, and their
+# values are either put through the _as_int coercion or fail toward action; a
+# daemon helper always can offer an _into form, so it must.
+
+# Every function the daemon defines, harvested from the source so a helper added
+# later is covered without editing a list here.
+_daemon_defined_fns() {
+  grep -oE '^[A-Za-z_][A-Za-z0-9_]*\(\)' "$DAEMON" | sed 's/()$//' | sort -u
+}
+
+# The conditional lines of a `declare -f` body: any `[ ... ]` / `[[ ... ]]` test
+# (bare, or after if/while/&&/||) and any `case ... in` dispatch. Arithmetic
+# expansion is not a capture and is deliberately not matched.
+_conditional_lines() {  # <body>
+  printf '%s\n' "$1" | grep -E '\[\[? |^[[:space:]]*case .+ in[[:space:]]*$' || true
+}
+
+# Report every branched-on value in <body> that crosses a command substitution.
+# Prints one line per offender and nothing when the body is clean, so it doubles
+# as the detector under test in the positive control below.
+_capture_offenders() {  # <body>
+  local body=$1 conds vars v assigns fns hit
+  conds=$(_conditional_lines "$body")
+  fns=$(_daemon_defined_fns)
+  # (a) a capture inline inside the conditional itself, of anything at all.
+  printf '%s\n' "$conds" | grep -E '\$\([^(]' | sed 's/^/inline: /' || true
+  # (b) a variable the conditional reads that was assigned from a capture of a
+  #     daemon-defined function, including one nested inside the captured command.
+  vars=$(printf '%s\n' "$conds" | grep -oE '\$\{?[A-Za-z_][A-Za-z0-9_]*' \
+           | tr -d '${' | sort -u)
+  for v in $vars; do
+    assigns=$(printf '%s\n' "$body" | grep -E "^[[:space:]]*$v=.*\\\$\(" || true)
+    [ -n "$assigns" ] || continue
+    for hit in $(printf '%s\n' "$assigns" | grep -oE '\$\([[:space:]]*[A-Za-z_][A-Za-z0-9_]*' \
+                   | sed 's/^\$([[:space:]]*//' | sort -u); do
+      printf '%s\n' "$fns" | grep -qxF "$hit" && printf 'via %s: %s\n' "$v" "$hit"
+    done
+  done
+  return 0
+}
+
+# The positive control is the detector itself, driven against two synthetic
+# bodies that carry the exact shapes it exists to catch. If the harvesting, the
+# conditional match or the assignment scan ever stops working, this case fails
+# here rather than passing while measuring nothing across the real bodies.
+test_liveness_decisions_branch_only_on_variables() {
+  local fn body offenders conds
+  offenders=$(_capture_offenders 'fake_inline ()
+{
+    [ -s "$(_file_age /tmp/x)" ] || return 1
+}')
+  [ -n "$offenders" ] || fail "the detector missed an inline capture inside a conditional"
+  offenders=$(_capture_offenders 'fake_indirect ()
+{
+    q=$(_file_age /tmp/x);
+    [ -s "$q" ] || return 1
+}')
+  [ -n "$offenders" ] || fail "the detector missed a conditional reading a captured daemon helper"
+  offenders=$(_capture_offenders 'fake_external ()
+{
+    q=$(cat /tmp/x);
+    [ -s "$q" ] || return 1
+}')
+  [ -z "$offenders" ] || fail "the detector flagged an unavoidable external-command capture"
+
+  for fn in _backstop_should_arm throttle_ready poke_should_fire poke_session \
+            _poke_oldest_age_into _poke_queue_sig_into handle_wake housekeeping \
+            trim_log; do
+    body=$(declare -f "$fn") \
+      || fail "$fn is not defined, so this case measures nothing"
+    conds=$(_conditional_lines "$body")
+    [ -n "$conds" ] \
+      || fail "$fn has no conditional left, so this case measures nothing"
+    offenders=$(_capture_offenders "$body")
+    [ -z "$offenders" ] \
+      || fail "$fn branches on a value read across a command substitution: $offenders"
+  done
+  pass "liveness decisions: no branched-on value crosses a capture, numbers, paths and strings alike"
+}
+
+# A working-path control for the rewritten poke helpers, not a discriminator:
+# the structural case above is what fails against the captured queue path. This
+# one pins that moving the path off the capture did not break the ordinary
+# stranded-queue reading, which a purely structural rule cannot tell you.
+test_poke_reads_the_queue_path_without_a_capture() {
+  local state got now
+  state=$(new_state poke-queue-path)
+  now=$(date +%s)
+  printf '%s\t1\tsignal\tfoo-x1\tsignal: foo-x1\n' "$(( now - 3600 ))" > "$state/.wake-queue"
+  _poke_oldest_age_into got "$state"
+  [ "$got" -ge 3500 ] \
+    || fail "the oldest queued wake read as $got, so the queue path did not resolve"
+  poke_should_fire "$state" \
+    || fail "the stranded-wake poke fell silent on a genuinely stranded queue"
+  pass "_poke_oldest_age_into: the queue path resolves without crossing a capture"
+}
+
 # --- 7. a cadence that feeds `sleep` must stay positive ---------------------
 #
 # Integer-ness is not enough for the values that pace the loops. `sleep 0`
@@ -1103,6 +1250,8 @@ test_backstop_arms_when_the_beacon_age_capture_is_polluted
 test_backstop_arms_when_the_grace_capture_is_polluted
 test_poke_fires_when_its_operand_captures_are_polluted
 test_liveness_decisions_compare_only_variables
+test_liveness_decisions_branch_only_on_variables
+test_poke_reads_the_queue_path_without_a_capture
 test_env_pos_int_floors_non_positive_cadences
 test_env_pos_int_warns_on_a_non_positive_cadence
 test_sleep_cadences_are_read_through_the_positive_floor
