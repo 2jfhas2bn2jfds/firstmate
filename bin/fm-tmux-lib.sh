@@ -56,7 +56,20 @@ FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.'
 # alternative carries its own anchor - the distinctive footer middle-dot "·"
 # separator immediately before "<N> shell", or the full "<N> shell(s) still
 # running" phrase. FM_BG_SHELL_REGEX overrides the set.
-FM_TMUX_BG_SHELL_REGEX_DEFAULT='[0-9]+[[:space:]]+shells?[[:space:]]+still[[:space:]]+running|·[[:space:]]*[0-9]+[[:space:]]+shells?([[:space:]]|$)'
+#
+# Monitors (found by datefit-mate 2026-07-31): claude counts background MONITORS
+# alongside shells and renders them as one comma-separated list before the single
+# trailing "still running":
+#   "2 shells, 1 monitor still running"
+#   "✻ Cooked for 2m 1s · 1 shell, 1 monitor still running"
+# The original pattern required "shells" to be followed directly by "still", and
+# its "·"-anchored alternative required whitespace or end-of-line after the noun,
+# so BOTH alternatives missed a comma-separated list and a crew idle-waiting on
+# its own monitor read as stale. The count+noun unit is now (shell|monitor), and
+# a list of those units may precede "still running"; the "·" alternative accepts
+# a comma as a terminator too. Both anchors are unchanged in strength: a bare
+# count+noun with neither "·" nor "still running" still does not match.
+FM_TMUX_BG_SHELL_REGEX_DEFAULT='[0-9]+[[:space:]]+(shell|monitor)s?([[:space:]]*,[[:space:]]*[0-9]+[[:space:]]+(shell|monitor)s?)*[[:space:]]+still[[:space:]]+running|·[[:space:]]*[0-9]+[[:space:]]+(shell|monitor)s?([[:space:],]|$)'
 
 # fm_tmux_strip_ghost: remove dim/faint (ANSI SGR 2) styled runs from one captured
 # composer line, then drop any remaining escape sequences, leaving only the plain,

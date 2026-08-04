@@ -104,6 +104,9 @@
 #          FM_WATCH_ARM_BIN         watcher-arm script the backstop launches
 #                                   (override for tests; default the sibling
 #                                   bin/fm-watch-arm.sh)
+#          FM_INT_WARN_INTERVAL_MIN minutes between repeated stderr warnings for
+#                                   the SAME unreadable numeric value; the daemon
+#                                   log records every occurrence (default 10)
 #          FM_BUSY_REGEX            OR-ed busy signatures (mirrors fm-watch.sh)
 #          FM_COMPOSER_IDLE_RE      empty-composer regex applied after dim-ghost
 #                                   and structural border stripping (default:
@@ -174,6 +177,9 @@ CRASH_BACKOFF_DEFAULT=60
 CRASH_NORMAL_SLEEP_DEFAULT=5
 LOG_MAX_BYTES_DEFAULT=1048576
 LOG_KEEP_LINES_DEFAULT=2000
+# Minutes between repeated stderr warnings about the SAME unreadable numeric
+# value (see _int_warn). The daemon log records every occurrence regardless.
+INT_WARN_INTERVAL_MIN_DEFAULT=10
 
 # --- always-on (present-mode) liveness tunables -----------------------------
 # These drive the minimal liveness layer the daemon runs while afk is INACTIVE.
@@ -226,11 +232,81 @@ if [ "$(uname)" = Darwin ]; then
 else
   _stat_file_mtime() { stat -c %Y "$1" 2>/dev/null; }
 fi
-_now() { date +%s; }
-_file_age() {  # seconds since mtime; very large if missing
-  local f=$1 m
+# --- numeric coercion (incident daemon-rearm-fix-d8) ------------------------
+# Every liveness decision below is an integer comparison over a value read from
+# a command (stat, date, wc) or a state file, and a bare `[ "$v" -ge N ]` aborts
+# with "integer expression expected" the moment that value is not a clean
+# integer. Two real pollutions were observed in this home's own daemon stderr:
+#   - BSD `wc` LEFT-PADS its count, so `sz=$(wc -c < "$LOG")` is "  192505".
+#     Padding ALONE is tolerated by bash's `[` and by $(( )), so it is not by
+#     itself the abort; it is the carrier that made the next one fatal here.
+#   - When the disk fills, a bash builtin's output write fails and the undrained
+#     buffer is flushed into a LATER command substitution, so `$(date +%s)` and
+#     `$(wc -c ...)` come back with a stale log line APPENDED:
+#       "1784687492\n[2026-07-15T05:17:47-0300] watcher beacon stale 461s ..."
+#     A multi-line operand aborts both `[` and $(( )).
+# That killed the watcher-liveness backstop from 2026-07-15: `[` errored,
+# _backstop_should_arm returned non-zero, and a lapsed watcher chain was never
+# re-armed - for three weeks, silently, because nothing checked.
+#
+# So no comparison consumes a raw value any more. _as_int keeps the FIRST line
+# (the real value under both pollutions), strips surrounding whitespace, and
+# yields a bare integer or falls back LOUDLY. Every fallback in the liveness
+# path is chosen to fail toward ACTION (arm the watcher) rather than toward
+# silence, because a redundant arm is a no-op while a missed one is an outage.
+_as_int() {  # <raw> <fallback> [context] -> a bare integer (or <fallback>) on stdout
+  local raw=$1 fallback=$2 ctx=${3:-value} v digits
+  v=${raw%%$'\n'*}                    # first line only
+  v="${v#"${v%%[![:space:]]*}"}"      # strip leading whitespace
+  v="${v%"${v##*[![:space:]]}"}"      # strip trailing whitespace
+  digits=${v#-}
+  case "$digits" in
+    ''|*[!0-9]*) _int_warn "$ctx" "$raw"; printf '%s' "$fallback"; return ;;
+  esac
+  printf '%s' "$v"
+}
+
+# Never silent. An unreadable numeric value means a liveness decision just ran
+# on a fallback, which is precisely the failure that hid for three weeks. Every
+# occurrence goes to the daemon log (size-capped by trim_log); stderr gets one
+# line per context per FM_INT_WARN_INTERVAL_MIN minutes, because the full disk
+# that causes this pollution is not helped by megabytes of warnings. The
+# throttle is an mtime probe via `find -mmin`, deliberately NOT arithmetic, so
+# the warning path cannot itself trip the fault it is reporting.
+_int_warn() {  # <context> <raw>
+  local ctx=$1 raw=$2 marker state mins
+  raw=$(printf '%s' "$raw" | tr '\n\t' '  ' | cut -c1-120)
+  log "ERROR: unreadable numeric value for ${ctx} (raw='${raw}'); decision fell back"
+  state=${FM_DAEMON_WARN_STATE:-}
+  if [ -n "$state" ] && [ -d "$state" ]; then
+    marker="$state/.subsuper-intwarn-$(printf '%s' "$ctx" | tr -c '[:alnum:]' '-')"
+    mins=${FM_INT_WARN_INTERVAL_MIN:-$INT_WARN_INTERVAL_MIN_DEFAULT}
+    if [ -e "$marker" ] && [ -n "$(find "$marker" -mmin "-$mins" 2>/dev/null)" ]; then
+      return 0
+    fi
+    : > "$marker" 2>/dev/null || true
+  fi
+  printf 'fm-supervise-daemon: ERROR: unreadable numeric value for %s (raw=%s); decision fell back\n' \
+    "$ctx" "$raw" >&2
+}
+
+# Current epoch seconds, always a bare integer. Callers both compare it and
+# write it to marker files (`_now > "$marker"`), so a polluted clock read must
+# never propagate. The trailing newline matches what `date +%s` wrote, keeping
+# the on-disk marker format byte-identical to before.
+_now() { printf '%s\n' "$(_as_int "$(date +%s)" 0 'clock')"; }
+
+_file_age() {  # seconds since mtime; the 999999 sentinel when unknown/missing
+  local f=$1 m now age
   m=$(_stat_file_mtime "$f") || { echo 999999; return; }
-  echo $(( $(_now) - m ))
+  m=$(_as_int "$m" '' "mtime:$f")
+  now=$(_as_int "$(date +%s)" '' 'clock')
+  # An unusable mtime or clock reads as "very old", so a liveness check that
+  # depends on it errs toward re-arming rather than toward doing nothing.
+  if [ -z "$m" ] || [ -z "$now" ]; then echo 999999; return; fi
+  age=$(( now - m ))
+  [ "$age" -lt 0 ] && age=0   # a future mtime is fresh, never a negative age
+  echo "$age"
 }
 
 _hash_text() {
@@ -484,7 +560,7 @@ escalate_flush() {  # <state>
   local state=$1 buf item n msg
   buf="$state/.subsuper-escalations"
   [ -s "$buf" ] || return 0
-  n=$(wc -l < "$buf" 2>/dev/null || echo 0)
+  n=$(_as_int "$(wc -l < "$buf" 2>/dev/null || echo 0)" 0 'escalation-count')
   # Join buffered items with the literal " | " separator into one digest line.
   msg=$(awk 'NR>1{printf " | "} {printf "%s",$0} END{print ""}' "$buf" 2>/dev/null)
   # Single-line wrapper: no embedded newlines (inject_msg also collapses as a
@@ -518,14 +594,16 @@ inject_wedge_alarm() {  # <state> <age-seconds>
 }
 
 _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first arrived (sidecar epoch)
-  local f=$1 since
+  local f=$1 since epoch now age
   [ -s "$f" ] || { echo 999999; return; }
   since="${f}.since"
-  if [ -r "$since" ]; then
-    echo $(( $(_now) - $(cat "$since" 2>/dev/null || echo 0) ))
-  else
-    echo 999999
-  fi
+  [ -r "$since" ] || { echo 999999; return; }
+  epoch=$(_as_int "$(cat "$since" 2>/dev/null || true)" '' 'escalation-since')
+  now=$(_as_int "$(date +%s)" '' 'clock')
+  { [ -n "$epoch" ] && [ -n "$now" ]; } || { echo 999999; return; }
+  age=$(( now - epoch ))
+  [ "$age" -lt 0 ] && age=0
+  echo "$age"
 }
 
 # --- housekeeping (runs every tick while the watcher is mid-cycle) ----------
@@ -577,7 +655,9 @@ housekeeping() {  # <state>
   for marker in "$state"/.subsuper-stale-*; do
     [ -e "$marker" ] || continue
     key="${marker##*.subsuper-stale-}"
-    age=$(( now - $(cat "$marker" 2>/dev/null || echo "$now") ))
+    last=$(_as_int "$(cat "$marker" 2>/dev/null || true)" "$now" "stale-marker:$key")
+    age=$(( now - last ))
+    [ "$age" -lt 0 ] && age=0
     [ "$age" -ge "${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}" ] || continue
     # Reconstruct the window name from the key (best-effort: session is unknown,
     # so probe the live fm-* windows for one whose task matches).
@@ -721,10 +801,12 @@ _in_flight_count() {  # <state>
 # task is in flight AND the watcher liveness beacon is missing or older than
 # FM_GUARD_GRACE. Pure read (no side effects), so it is directly testable.
 _backstop_should_arm() {  # <state>
-  local state=$1 age
+  local state=$1 age grace
   [ "$(_in_flight_count "$state")" -gt 0 ] || return 1
   age=$(_file_age "$state/.last-watcher-beat")
-  [ "$age" -ge "${FM_GUARD_GRACE:-$GUARD_GRACE_DEFAULT}" ]
+  grace=$(_as_int "${FM_GUARD_GRACE:-$GUARD_GRACE_DEFAULT}" \
+                  "$GUARD_GRACE_DEFAULT" 'FM_GUARD_GRACE')
+  [ "$age" -ge "$grace" ]
 }
 
 # ensure_watcher_backstop: when _backstop_should_arm says so (throttled to one
@@ -741,10 +823,12 @@ _backstop_should_arm() {  # <state>
 # stranded-wake poke, not this, re-invokes the LLM; this only keeps the enqueue
 # machinery and beacon alive.
 ensure_watcher_backstop() {  # <state>
-  local state=$1 age throttle
+  local state=$1 age throttle min_gap
   _backstop_should_arm "$state" || return 0
   throttle=$(_file_age "$state/.subsuper-last-backstop-arm")
-  [ "$throttle" -ge "${FM_BACKSTOP_ARM_THROTTLE:-$BACKSTOP_ARM_THROTTLE_DEFAULT}" ] || return 0
+  min_gap=$(_as_int "${FM_BACKSTOP_ARM_THROTTLE:-$BACKSTOP_ARM_THROTTLE_DEFAULT}" \
+                    "$BACKSTOP_ARM_THROTTLE_DEFAULT" 'FM_BACKSTOP_ARM_THROTTLE')
+  [ "$throttle" -ge "$min_gap" ] || return 0
   _now > "$state/.subsuper-last-backstop-arm"
   age=$(_file_age "$state/.last-watcher-beat")
   log "watcher beacon stale ${age}s with $(_in_flight_count "$state") in flight; launching backstop re-arm"
@@ -952,10 +1036,15 @@ handle_wake() {  # <reason> <state>
 log() { [ -n "${LOG:-}" ] && printf '[%s] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >> "$LOG"; }
 
 trim_log() {
-  local sz tmp
+  local sz tmp max
   [ -n "${LOG:-}" ] || return 0
+  # BSD wc left-pads ("  192505"), so this is one of the raw values that broke
+  # the daemon's comparisons; 0 means "do not trim", the non-destructive default.
   sz=$(wc -c < "$LOG" 2>/dev/null) || return 0
-  [ "$sz" -ge "${FM_LOG_MAX_BYTES:-$LOG_MAX_BYTES_DEFAULT}" ] || return 0
+  sz=$(_as_int "$sz" 0 'log-size')
+  max=$(_as_int "${FM_LOG_MAX_BYTES:-$LOG_MAX_BYTES_DEFAULT}" \
+                "$LOG_MAX_BYTES_DEFAULT" 'FM_LOG_MAX_BYTES')
+  [ "$sz" -ge "$max" ] || return 0
   tmp=$(mktemp "${TMPDIR:-/tmp}/fm-daemon-log.XXXXXX") || return 0
   tail -n "${FM_LOG_KEEP_LINES:-$LOG_KEEP_LINES_DEFAULT}" "$LOG" >"$tmp" 2>/dev/null && mv -f "$tmp" "$LOG"
 }
@@ -969,6 +1058,10 @@ fm_super_main() {
   local STATE
   STATE="$(_state_root)"
   mkdir -p "$STATE"
+  # Where _int_warn keeps its per-context stderr throttle markers. Global (not
+  # local) so command substitutions see it; unset when the pure functions are
+  # sourced by tests, which then warn on every occurrence.
+  FM_DAEMON_WARN_STATE="$STATE"
 
   # Source the portable lock helpers (works on macOS where flock is absent).
   # Export FM_STATE_OVERRIDE so the lib resolves the same state dir.

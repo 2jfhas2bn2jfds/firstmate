@@ -80,6 +80,46 @@ test_bg_shell_matches_permissions_form() {
   pass "fm_pane_has_bg_shell: the '· 1 shell ·' permission-footer segment counts"
 }
 
+# Monitors (found by datefit-mate 2026-07-31). claude counts background MONITORS
+# alongside shells and renders them as ONE comma-separated list before a single
+# trailing "still running". The original pattern required "shells" to be followed
+# directly by "still", and its "·"-anchored alternative required whitespace or
+# end-of-line after the noun, so both alternatives missed the comma-separated
+# list: a crew idle-waiting on its own monitor read as stale and woke firstmate
+# for nothing.
+test_bg_shell_matches_shell_and_monitor_form() {
+  local dir fb pane; dir="$TMP_ROOT/monitor"; mkdir -p "$dir"
+  fb=$(make_pane_tmux "$dir"); pane="$dir/pane.txt"
+  # The exact footer reported from the field.
+  printf 'waiting on the suite\n2 shells, 1 monitor still running\n' > "$pane"
+  assert_bg_shell "$fb" "$pane" yes "'2 shells, 1 monitor still running' is busy"
+  # The same list inside the "Cooked" footer form.
+  printf 'waiting on the suite\n✻ Cooked for 2m 1s · 1 shell, 1 monitor still running\n' > "$pane"
+  assert_bg_shell "$fb" "$pane" yes "'· 1 shell, 1 monitor still running' is busy"
+  # A monitor with no shell at all.
+  printf 'waiting on the suite\n1 monitor still running\n' > "$pane"
+  assert_bg_shell "$fb" "$pane" yes "'1 monitor still running' alone is busy"
+  # Plural monitors, and a longer list.
+  printf 'waiting on the suite\n3 shells, 2 monitors still running\n' > "$pane"
+  assert_bg_shell "$fb" "$pane" yes "'3 shells, 2 monitors still running' is busy"
+  # The compact permission-footer segment, where a comma terminates the noun.
+  printf 'waiting\n⏵⏵ bypass permissions on · 2 shells, 1 monitor · ← for agents\n' > "$pane"
+  assert_bg_shell "$fb" "$pane" yes "'· 2 shells, 1 monitor ·' footer segment is busy"
+  pass "fm_pane_has_bg_shell: shell+monitor footer forms count"
+}
+
+# The monitor noun must not weaken either anchor: prose in the footer region
+# naming a monitor, with no "·" and no "still running", must still NOT count.
+test_bg_shell_ignores_unanchored_footer_monitor() {
+  local dir fb pane; dir="$TMP_ROOT/unanchored-monitor"; mkdir -p "$dir"
+  fb=$(make_pane_tmux "$dir"); pane="$dir/pane.txt"
+  printf 'done working\n✔ added 1 monitor to the dashboard\n> \n' > "$pane"
+  assert_bg_shell "$fb" "$pane" no "footer 'added 1 monitor' without the anchor does not count"
+  printf 'done working\n✔ the monitor is still running fine\n> \n' > "$pane"
+  assert_bg_shell "$fb" "$pane" no "'the monitor is still running' with no count does not count"
+  pass "fm_pane_has_bg_shell: an unanchored footer monitor does not false-positive"
+}
+
 test_bg_shell_matches_plural_forms() {
   local dir fb pane; dir="$TMP_ROOT/plural"; mkdir -p "$dir"
   fb=$(make_pane_tmux "$dir"); pane="$dir/pane.txt"
@@ -194,6 +234,21 @@ test_crewstate_claude_bg_shell_is_working() {
   pass "fm-crew-state: a claude background-shell footer reads working"
 }
 
+# End to end, the case that produced the false stale wake on 2026-07-31: a claude
+# crew idle-waiting on its own monitor must read as WORKING, not as stale.
+test_crewstate_claude_monitor_footer_is_working() {
+  local d; d=$(new_case cs-monitor)
+  make_repo_on_branch "$d/wt" fm/feat-mon
+  make_crewstate_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-mon.meta" \
+    "window=fm:fm-feat-mon" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'running the suite\n2 shells, 1 monitor still running\n' > "$d/pane.txt"
+  local out; out=$(FM_FAKE_AXI_STATUS="" FM_FAKE_AXI_LIST="" run_crew_state "$d" feat-mon)
+  assert_contains "$out" "state: working" "shell+monitor footer -> working"
+  assert_contains "$out" "background shell running" "detail names the background shell"
+  pass "fm-crew-state: a shell+monitor footer reads working, not stale"
+}
+
 # Same footer under harness=codex must NOT count (the signature is claude-specific).
 # With no run, no spinner, and no status log, the codex crew falls to unknown/none.
 test_crewstate_codex_bg_shell_not_gated() {
@@ -239,10 +294,13 @@ EOF
 test_bg_shell_matches_cooked_form
 test_bg_shell_matches_permissions_form
 test_bg_shell_matches_plural_forms
+test_bg_shell_matches_shell_and_monitor_form
+test_bg_shell_ignores_unanchored_footer_monitor
 test_bg_shell_ignores_transcript_body_prose
 test_bg_shell_ignores_unanchored_footer_shell
 test_bg_shell_distinct_from_spinner
 test_crewstate_claude_bg_shell_is_working
+test_crewstate_claude_monitor_footer_is_working
 test_crewstate_codex_bg_shell_not_gated
 test_crewstate_runstep_still_wins_over_bg_shell
 
