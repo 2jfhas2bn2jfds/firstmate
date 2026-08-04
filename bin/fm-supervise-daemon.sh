@@ -107,10 +107,6 @@
 #          FM_INT_WARN_INTERVAL_MIN minutes between repeated stderr warnings for
 #                                   the SAME unreadable numeric value; the daemon
 #                                   log records every occurrence (default 10)
-#          FM_THROTTLE_FALLBACK_TICKS calls between two firings of a rate-limited
-#                                   action while the clock is unreadable and
-#                                   wall-clock throttling is impossible
-#                                   (default 12; see throttle_ready)
 #          FM_BUSY_REGEX            OR-ed busy signatures (mirrors fm-watch.sh)
 #          FM_COMPOSER_IDLE_RE      empty-composer regex applied after dim-ghost
 #                                   and structural border stripping (default:
@@ -184,12 +180,6 @@ LOG_KEEP_LINES_DEFAULT=2000
 # Minutes between repeated stderr warnings about the SAME unreadable numeric
 # value (see _int_warn). The daemon log records every occurrence regardless.
 INT_WARN_INTERVAL_MIN_DEFAULT=10
-# Calls between two firings of a rate-limited action while the clock is
-# unreadable, when no wall-clock throttling is possible at all (see
-# throttle_ready). Every tick-gated action in the daemon runs on a cadence
-# between 1s and 15s, so 12 calls keeps the degraded rate within a small factor
-# of the wall-clock cadence it stands in for.
-THROTTLE_FALLBACK_TICKS_DEFAULT=12
 
 # --- always-on (present-mode) liveness tunables -----------------------------
 # These drive the minimal liveness layer the daemon runs while afk is INACTIVE.
@@ -352,19 +342,20 @@ _now() {
 }
 
 # The "very old" sentinel an unmeasurable age reads as. Named because it is a
-# policy, not a magic number: a LIVENESS age (is the beacon stale? is a queued
-# wake stranded?) must fail toward ACTION, and "very old" is what makes it do so.
-# It is deliberately NOT the fallback for a THROTTLE age; see throttle_ready.
+# policy, not a magic number: an age the daemon cannot measure must fail toward
+# ACTION, and "very old" is what makes it do so. That is the right reading for a
+# liveness age (is the beacon stale? is a queued wake stranded?) and, as
+# throttle_ready explains, for a throttle age too: the condition that makes an
+# age unmeasurable is the incident, and a check that goes quiet during its own
+# incident is not a check.
 AGE_UNKNOWN=999999
 
 # Seconds elapsed since <epoch-raw>. The ONE place the coerce-both-operands /
 # subtract / clamp-negative sequence lives, so the arithmetic cannot drift
 # between the beacon age, the escalation-buffer age, the stale-marker age, the
 # wake-queue age and the throttle ages. It reports an unmeasurable age as a
-# NON-ZERO status and leaves the FALLBACK POLICY to its callers, because the two
-# policies genuinely differ and must not be shared: _age_since collapses unknown
-# into the very-old sentinel so a liveness check errs toward acting, while
-# _measured_file_age keeps unknown as unknown so a throttle can degrade instead.
+# NON-ZERO status so the sentinel is applied in exactly one place (_age_since)
+# instead of being re-derived, differently, per caller.
 _elapsed_since() {  # <epoch-raw> <context> -> age on stdout + status 0, or status 1
   local raw=$1 ctx=$2 epoch now age
   epoch=$(_as_int "$raw" '' "$ctx")
@@ -397,8 +388,8 @@ _age_phrase() {  # <age> -> "<n>s" or an explicit unknown
 
 # Stamp the current epoch into a marker file. Some markers are read back by
 # CONTENT (the stale marker, the escalation-since sidecar) and some only by
-# MTIME (the tick throttles), so an unusable clock truncates the file instead of
-# writing a fabricated epoch: the mtime still advances, keeping every throttle
+# MTIME (the throttle markers), so an unusable clock truncates the file instead
+# of writing a fabricated epoch: the mtime still advances, keeping every throttle
 # honest, while a content reader sees an empty value that _age_since turns into
 # the "very old" sentinel rather than a believable 1970 timestamp.
 _stamp_now() {  # <file>
@@ -408,126 +399,37 @@ _stamp_now() {  # <file>
   return 1
 }
 
-# Measured age of <file>, or a NON-ZERO status when the age cannot be measured
-# at all. The difference from _file_age is the whole point: _file_age collapses
-# "unknown" into the very-old sentinel, which is right for a liveness check and
-# wrong for a throttle, so a throttle needs to see "unknown" as unknown.
-_measured_file_age() {  # <file> -> age on stdout + status 0, or status 1
-  local f=$1 m
-  m=$(_stat_file_mtime "$f") || return 1
-  _elapsed_since "$m" "mtime:$f"
-}
-
 _file_age() {  # seconds since mtime; the AGE_UNKNOWN sentinel when unknown/missing
-  local age
-  age=$(_measured_file_age "$1") || { echo "$AGE_UNKNOWN"; return; }
-  echo "$age"
-}
-
-# Per-gate throttle state lives in shell VARIABLES, never on disk. The condition
-# that makes the clock unreadable is a full filesystem, so anything the throttle
-# writes to that filesystem stops working in exactly the incident it exists for:
-# the write truncates the file and then fails, every later read comes back empty,
-# and the throttle either pins shut or stops limiting at all. A guard whose
-# failure mode is caused by the condition it guards against is not a guard. Every
-# throttle is called straight from the daemon's long-lived loop process and never
-# inside a command substitution, so a variable survives across ticks exactly as a
-# file would have. bash 3.2 has no associative arrays, so the gate key is
-# name-mangled into a plain variable name (every gate keeps its own state).
-_throttle_var() {  # <slot> <gate-key> -> variable name
-  printf '%s' "_FM_THROTTLE_${1}_${2//[^A-Za-z0-9]/_}"
-}
-
-# Drop a gate's in-memory state. It stands in for what the marker file records,
-# so it must never outlive that marker: a countdown or a firing time left over
-# from a finished episode would throttle the next one for reasons that have
-# nothing to do with it.
-_throttle_forget() {  # <gate-key>
-  unset "$(_throttle_var TICK "$1")" "$(_throttle_var FIRED "$1")" \
-        "$(_throttle_var SEEN "$1")"
-}
-
-# End a throttled episode: drop the marker AND the in-memory state keyed to it.
-# The two are one piece of state, so removing only the file is what leaves a
-# stale count suppressing the next episode.
-throttle_reset() {  # <marker>
-  rm -f "$1"
-  _throttle_forget "$1"
-}
-
-# Clock-independent stand-in for a wall-clock throttle: allow the action once
-# every FM_THROTTLE_FALLBACK_TICKS calls for <gate-key>. Reached only when the
-# clock cannot be read at all, so there is no time left to throttle by.
-#
-# The FIRST call for a key always fires, so falling back never delays an action's
-# first run; the counter is a countdown to the next firing after that.
-_tick_gate_ready() {  # <gate-key>
-  local key=$1 var n every
-  every=$(_env_int FM_THROTTLE_FALLBACK_TICKS "$THROTTLE_FALLBACK_TICKS_DEFAULT")
-  [ "$every" -ge 1 ] || every=1
-  var=$(_throttle_var TICK "$key")
-  n=${!var-}
-  case "$n" in ''|*[!0-9]*) n=0 ;; esac
-  if [ "$n" -le 0 ]; then
-    printf -v "$var" '%s' "$every"
-    return 0
-  fi
-  printf -v "$var" '%s' "$(( n - 1 ))"
-  return 1
+  local m
+  m=$(_stat_file_mtime "$1") || { echo "$AGE_UNKNOWN"; return; }
+  _age_since "$m" "mtime:$1"
 }
 
 # The ONE rate limiter for every periodic action in the daemon: 0 when the action
-# is due to run again.
+# is due to run again, measured as the age of <marker>, which its caller stamps
+# each time it acts.
 #
-# While the clock is readable the throttle is pure wall clock, measured against
-# whichever is more recent of the marker's mtime and this process's own last
-# firing. That second reading is what keeps the throttle honest when the marker
-# cannot be written: on a full disk _stamp_now's write fails, the marker stays
-# absent, and a mtime-only throttle would fire the action on every single tick.
-# A marker that is absent with no recorded firing means the action has never run,
-# and fires at once: a throttle must never delay an action's first run.
+# A marker that is not there means the action has never run, and it fires at
+# once: a throttle must never delay an action's first run. That is also what a
+# marker _stamp_now could not create looks like on a full disk, so the action
+# keeps happening rather than waiting on a file the disk will not accept.
 #
-# When the clock cannot be read at all there is no time to throttle by, and BOTH
-# naive fallbacks are wrong: reading the age as very old fires the action every
-# single tick, which is the burst the throttle exists to prevent, while reading
-# it as just-acted never fires the action again, which is the silent-no-fire
-# outage this daemon exists to end. So an unreadable clock, and only an
-# unreadable clock, degrades to the clock-independent tick gate: the action still
-# happens periodically, just on a call count instead of a cadence.
+# The age is read through _file_age, so an unreadable clock reads as very old and
+# the action fires on every tick until the clock comes back. That direction is
+# deliberate, and it is the whole policy: the condition that makes the clock
+# unreadable is a full filesystem, which is precisely the incident the gated
+# actions exist to survive, so a fallback that limited the rate there would go
+# quiet during its own incident. A check the feared condition makes quieter is
+# not a check. The cost settles it too: fm-watch-arm.sh no-ops against a healthy
+# watcher, so a redundant firing costs a process check while a missed one is an
+# unsupervised fleet.
 #
-# The countdown that gate keeps is dropped when the EPISODE ends, which is the
-# marker going from present to absent, and at no other time. In particular a
-# readable call must not drop it: the pollution that makes the clock unreadable
-# lands in SOME later command substitution, so the real failure is intermittent,
-# and clearing the countdown on every readable tick would let the gate's
-# first-call-always-fires rule fire again on every unreadable one. That is one
-# arm every other tick, the burst, reached from the other side.
+# Nothing here keeps state of its own, on disk or in memory. The marker its
+# caller already stamps is the entire record, so there is no counter for a full
+# disk to pin shut and none to strand across episodes when a marker is removed.
 throttle_ready() {  # <marker> <min-gap-secs>
-  local marker=$1 gap=$2 age now last var seen_var
-  seen_var=$(_throttle_var SEEN "$marker")
-  if [ -e "$marker" ]; then
-    printf -v "$seen_var" '%s' 1
-  elif [ "${!seen_var-}" = 1 ]; then
-    # The marker this state stands for is gone, so the episode it belongs to is
-    # over. Keyed to the marker rather than to the caller, so a deletion that
-    # does not go through throttle_reset cannot strand a burnt count either.
-    _throttle_forget "$marker"
-  fi
-  now=$(_now) || { _tick_gate_ready "$marker"; return; }
-  if [ -e "$marker" ] && age=$(_measured_file_age "$marker"); then
-    [ "$age" -ge "$gap" ] || return 1
-  fi
-  var=$(_throttle_var FIRED "$marker")
-  last=${!var-}
-  case "$last" in ''|*[!0-9]*) last='' ;; esac
-  # A clock that has jumped BACKWARD makes the recorded firing unusable, so it is
-  # dropped rather than clamped to "just fired", which would hold the action shut
-  # for as long as the jump lasted.
-  if [ -n "$last" ] && [ "$now" -ge "$last" ]; then
-    [ "$(( now - last ))" -ge "$gap" ] || return 1
-  fi
-  printf -v "$var" '%s' "$now"
-  return 0
+  [ -e "$1" ] || return 0
+  [ "$(_file_age "$1")" -ge "$2" ]
 }
 
 _hash_text() {
@@ -787,12 +689,12 @@ escalate_flush() {  # <state>
   # Single-line wrapper: no embedded newlines (inject_msg also collapses as a
   # safety net, but keeping the source single-line makes the intent explicit).
   msg=$(printf 'Supervisor escalate (%s event(s)): %s (pre-read; re-arm not needed — watcher daemon-managed)' "$n" "$msg")
-  # A delivered digest ends the wedge episode, so the wedge throttle is reset
-  # rather than merely unlinked: the next episode must start un-throttled.
+  # A delivered digest ends the wedge episode, and the wedge marker is that
+  # episode's whole record, so dropping it is what lets the next wedge alarm at
+  # once instead of waiting out a window it had nothing to do with.
   if inject_msg "$msg" "$state"; then
     : > "$buf"
-    rm -f "${buf}.since"
-    throttle_reset "$state/.subsuper-inject-wedged"
+    rm -f "${buf}.since" "$state/.subsuper-inject-wedged"
     return 0
   fi
   return 1
@@ -808,9 +710,8 @@ escalate_flush() {  # <state>
 # The rate limit lives in ONE place: housekeeping's max-defer escape gate, which
 # is the only caller and which has already proved the same .subsuper-inject-wedged
 # marker is a max-defer window old. A second gate here added nothing on the wall
-# clock path and multiplied the two counts on the tick-gate fallback, so a
-# disk-full incident made the alarm twelve times quieter than intended. An alarm
-# that mutes itself during the incident it announces is not an alarm.
+# clock path and could only ever make the alarm quieter, and an alarm that mutes
+# itself during the incident it announces is not an alarm.
 inject_wedge_alarm() {  # <state> <age-seconds>
   local state=$1 age=$2 marker target
   marker="$state/.subsuper-inject-wedged"
@@ -876,7 +777,7 @@ housekeeping() {  # <state>
        && throttle_ready "$state/.subsuper-inject-wedged" "$max_defer"; then
       if escalate_flush "$state"; then
         log "inject recovered: max-defer flush succeeded; undelivered $(_age_phrase "$oldest")"
-        throttle_reset "$state/.subsuper-inject-wedged"
+        rm -f "$state/.subsuper-inject-wedged"
       else
         inject_wedge_alarm "$state" "$oldest"
       fi
@@ -1046,9 +947,10 @@ _backstop_should_arm() {  # <state>
 }
 
 # ensure_watcher_backstop: when _backstop_should_arm says so (throttled through
-# throttle_ready to one launch per BACKSTOP_ARM_THROTTLE so a stale window does
-# not spawn a burst, and to one launch per FM_THROTTLE_FALLBACK_TICKS ticks when
-# the clock is unreadable and no wall-clock throttling is possible),
+# throttle_ready to one launch per BACKSTOP_ARM_THROTTLE while the clock reads,
+# so a stale window does not spawn a burst; when it does not read, the arm fires
+# on every tick, because a redundant arm is a no-op against a healthy watcher and
+# a missed one is the outage this backstop exists to end),
 # launch fm-watch-arm.sh DETACHED. The arm blocks on its watcher child, so it is
 # double-forked ( ... & ) inside a subshell that exits immediately: the arm is
 # reparented away from the daemon (no zombie, never waited on) and re-establishes
