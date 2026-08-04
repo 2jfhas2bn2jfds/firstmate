@@ -45,6 +45,7 @@ See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/star
   In a test, always `mkdir -p` a case directory under `TMP_ROOT` before writing into it.
   `fm_test_tmproot` registers its cleanup trap from inside a command substitution, and bash runs an `EXIT` trap when that subshell exits, so the root is already gone by the time the path is echoed back.
   Every existing suite works only because it recreates its own case directories.
+  The helper's own header comment in `tests/lib.sh` describes this accurately; the underlying trap defect is tracked as its own work item.
 - CI also guards the shape of the tree: tracked files at the repo root are limited to a small allowlist, and every tracked path may use only `[A-Za-z0-9._/-]`.
   Both jobs exist because a mis-quoted shell redirect once committed a junk-named duplicate of the test suite that every other job passed.
   A deliberate new root file or unusual path name is a one-line change to the matching job in `.github/workflows/ci.yml`.
