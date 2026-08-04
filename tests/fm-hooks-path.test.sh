@@ -19,10 +19,15 @@
 #     empty, or present-but-untracked;
 #   - an already-set core.hooksPath is preserved and reported (never clobbered),
 #     including one set in a non-local scope;
+#   - a configured core.hooksPath pointing at a directory that no longer exists
+#     is REPORTED rather than short-circuited past, naming the stale value, since
+#     the short-circuit that would hide it is the same one that stops it ever
+#     being re-evaluated;
 #   - an active hook in the repo's real hooks directory blocks the write - a
 #     regular file, a symlinked hook, and a dangling symlink all count as active,
-#     while *.sample scaffolding does not;
-#   - an unresolvable git common dir fails CLOSED (no write);
+#     while *.sample scaffolding does not - and the warning names every entry it
+#     found, so a false positive is diagnosable rather than a mystery block;
+#   - an unresolvable git common dir fails CLOSED (no write) and says why;
 #   - fm-spawn sets core.hooksPath in the isolated worktree it launches into, and
 #     reports a conflicting pool value instead of skipping silently.
 # All hermetic over temp git repos and fakebins; never touches global git config,
@@ -169,10 +174,15 @@ test_noop_when_untracked() {
 test_preserves_existing_local_value() {
   local repo out
   repo=$(make_repo_with_hooks "$TMP_ROOT/conflict")
+  # The conflicting directory exists, so this test sees the conflict warning
+  # alone - which doubles as the control that the staleness check (T9) stays
+  # quiet about a value that still points at something.
+  mkdir -p "$repo/custom-hooks"
   git -C "$repo" config --local core.hooksPath 'custom-hooks'
 
   out=$(fm_hooks_path_apply "$repo" report 2>&1) || fail "apply returned non-zero on conflict"
   assert_contains "$out" "different core.hooksPath" "the conflicting value was not reported"
+  assert_not_contains "$out" "does not exist" "an existing conflicting dir was wrongly reported as stale"
   [ "$(hooks_path "$repo")" = 'custom-hooks' ] || fail "the explicitly-set core.hooksPath was clobbered"
 
   # Without the report flag the same conflict is preserved, but silently.
@@ -197,7 +207,7 @@ test_preserves_non_local_scope_value() {
   local repo fakehome out
   repo=$(make_repo_with_hooks "$TMP_ROOT/global-scope")
   fakehome="$TMP_ROOT/global-scope-home"
-  mkdir -p "$fakehome"
+  mkdir -p "$fakehome/global-hooks"
   printf '[core]\n\thooksPath = %s/global-hooks\n' "$fakehome" > "$fakehome/.gitconfig"
 
   # A subshell so the fake global config never leaks into the rest of the suite.
@@ -216,13 +226,56 @@ test_preserves_non_local_scope_value() {
   pass "T6b apply preserves and reports a core.hooksPath set in a non-local scope"
 }
 
+# --- T6c: a configured core.hooksPath that no longer exists is REPORTED -------
+# The failure this pins: a long-lived pooled clone adopts .githooks, the project
+# later drops the directory, and the value survives in the clone's shared common
+# config. Condition 1 then returns as soon as the directory is missing, so the
+# short-circuit that hides the stale value is the same one that stops it ever
+# being re-evaluated - and git pointed at a directory that does not exist runs no
+# committed hook and no check gate at all. So this test does it the hard way: set
+# the value, DELETE what it points at, and require that apply notices.
+test_reports_stale_hooks_path() {
+  local repo out
+  repo=$(make_repo_with_hooks "$TMP_ROOT/stale")
+  fm_hooks_path_apply "$repo"
+  [ "$(hooks_path "$repo")" = "$HOOK_DIR" ] || fail "precondition: adoption should have set core.hooksPath"
+
+  # The project drops its committed hooks directory; the clone keeps the value.
+  git -C "$repo" rm -rq "$HOOK_DIR"
+  git -C "$repo" commit -q -m 'drop committed hooks'
+  if [ -d "$repo/$HOOK_DIR" ]; then fail "precondition: the hooks dir should be gone"; fi
+
+  out=$(fm_hooks_path_apply "$repo" report 2>&1) || fail "apply returned non-zero on a stale value"
+  assert_contains "$out" "does not exist" "the stale core.hooksPath was short-circuited past, silently"
+  assert_contains "$out" "$HOOK_DIR" "the warning does not name the stale value"
+  [ "$(hooks_path "$repo")" = "$HOOK_DIR" ] || fail "the stale value was changed; this path only reports"
+
+  # Silent without the report flag, like every other advisory here.
+  out=$(fm_hooks_path_apply "$repo" 2>&1) || fail "silent apply returned non-zero on a stale value"
+  [ -z "$out" ] || fail "the stale report must be silent without the report flag, got: $out"
+
+  # An absolute value is checked the same way.
+  git -C "$repo" config --local core.hooksPath "$TMP_ROOT/stale-abs"
+  out=$(fm_hooks_path_apply "$repo" report 2>&1) || fail "apply returned non-zero on a stale absolute value"
+  assert_contains "$out" "$TMP_ROOT/stale-abs" "an absolute stale core.hooksPath was not reported"
+
+  # The control that keeps this honest: create the directory that value names
+  # and the warning stops. The check keys on the target existing, not merely on
+  # a value being set, so a blanket "always warn" would fail here.
+  mkdir -p "$TMP_ROOT/stale-abs"
+  out=$(fm_hooks_path_apply "$repo" report 2>&1) || fail "apply returned non-zero on a live absolute value"
+  [ -z "$out" ] || fail "a core.hooksPath whose target exists must not be reported stale, got: $out"
+  pass "T6c a core.hooksPath pointing at a deleted directory is reported, naming the stale value"
+}
+
 # --- T7: an active hook in the repo's real hooks dir blocks the write ---------
 # core.hooksPath overrides .git/hooks entirely, so a repo actually using
 # .git/hooks keeps them and is reported, never quietly overridden.
 assert_legacy_hook_blocks() {
   local repo=$1 label=$2 out
   out=$(fm_hooks_path_apply "$repo" report 2>&1) || fail "apply returned non-zero ($label)"
-  assert_contains "$out" "has an active hook" "the active .git/hooks hook was not reported ($label)"
+  assert_contains "$out" "has active hooks" "the active .git/hooks hook was not reported ($label)"
+  assert_contains "$out" "(pre-commit)" "the warning did not name the blocking entry ($label)"
   [ -z "$(hooks_path "$repo")" ] || fail "core.hooksPath was set over an active .git/hooks hook ($label)"
 }
 
@@ -261,6 +314,31 @@ test_active_legacy_hook_blocks() {
   [ -z "$out" ] || fail "sample files must not be reported as active hooks, got: $out"
   [ "$(hooks_path "$repo")" = "$HOOK_DIR" ] || fail "sample scaffolding wrongly blocked adoption"
   pass "T7 an active .git/hooks hook blocks the write (file, symlink, dangling); *.sample does not"
+}
+
+# --- T7a: the block names EVERY entry it found, not one example ---------------
+# The probe is deliberately over-inclusive (any non-sample entry blocks,
+# whatever its name or mode), so the block is only diagnosable if the warning
+# says which files caused it. One basename behind "e.g." turns a stray
+# .DS_Store into a mystery block someone works around.
+test_active_hook_warning_names_every_entry() {
+  local repo out
+  repo=$(make_repo_with_hooks "$TMP_ROOT/legacy-many")
+  rm -f "$repo"/.git/hooks/*
+  printf '#!/bin/sh\nexit 0\n' > "$repo/.git/hooks/pre-commit"
+  chmod +x "$repo/.git/hooks/pre-commit"
+  printf '#!/bin/sh\nexit 0\n' > "$repo/.git/hooks/pre-push"
+  chmod +x "$repo/.git/hooks/pre-push"
+  # A non-hook leftover: it blocks too, and naming it is what makes the block
+  # clearable in seconds instead of a permanent unexplained one.
+  printf 'noise\n' > "$repo/.git/hooks/.DS_Store"
+
+  out=$(fm_hooks_path_apply "$repo" report 2>&1) || fail "apply returned non-zero (several entries)"
+  assert_contains "$out" ".DS_Store" "the warning did not name the stray entry"
+  assert_contains "$out" "pre-commit" "the warning did not name the first hook"
+  assert_contains "$out" "pre-push" "the warning did not name the second hook"
+  [ -z "$(hooks_path "$repo")" ] || fail "core.hooksPath was set over active .git/hooks entries"
+  pass "T7a the active-hook warning names every entry it found, not just the first"
 }
 
 # --- T7b: an unresolvable git common dir fails CLOSED -------------------------
@@ -314,6 +392,11 @@ SH
     "control: the shim did not actually fail --git-common-dir, so nothing was under test"
   [ -z "$(hooks_path "$repo")" ] \
     || fail "core.hooksPath was written past a guard that could not check .git/hooks: $out"
+  # Failing closed silently would disable committed hooks fleet-wide while
+  # looking exactly like nothing being wrong, so the skip must say WHY.
+  assert_contains "$out" "cannot resolve its git common dir" \
+    "the fail-closed skip was silent, so a fleet-wide disable would leave no signal"
+  assert_contains "$out" "2.31" "the fail-closed warning does not name the likely cause"
 
   # The closing control: with the real git back, this very repo adopts. That
   # proves the skip above was caused by the unresolvable common dir alone and
@@ -405,7 +488,9 @@ test_noop_when_empty
 test_noop_when_untracked
 test_preserves_existing_local_value
 test_preserves_non_local_scope_value
+test_reports_stale_hooks_path
 test_active_legacy_hook_blocks
+test_active_hook_warning_names_every_entry
 test_unresolvable_common_dir_fails_closed
 test_spawn_sets_worktree_hooks_path
 test_spawn_reports_conflict

@@ -49,10 +49,35 @@
 #      .git/hooks keeps them and is reported, never quietly overridden. A hook
 #      installed as a symlink counts as active - husky and hand-rolled setups
 #      install hooks that way, and a dangling one counts too, because the write
-#      would override it just as silently either way. This condition also fails
-#      CLOSED: if the repo's real hooks directory cannot be resolved at all, the
-#      write is skipped rather than proceeding unguarded, matching every other
-#      condition here in leaving the repo exactly as it was.
+#      would override it just as silently either way. The probe is deliberately
+#      OVER-inclusive: any non-sample entry blocks, regardless of name or
+#      executable bit, because failing loud and wrong beats failing silent and
+#      wrong. The warning therefore names every entry it found rather than one
+#      example: a permanent block plus a recurring per-spawn warning that turns
+#      out to be a stray .DS_Store is exactly how a real warning becomes
+#      background noise people learn to skip, and an ignored warning is a
+#      documented gotcha with extra steps. Naming the files makes a false
+#      positive diagnosable and clearable in seconds instead of a mystery block
+#      someone works around. This condition also fails CLOSED: if the repo's
+#      real hooks directory cannot be resolved at all, the write is skipped
+#      rather than proceeding unguarded, matching every other condition here in
+#      leaving the repo exactly as it was - and it says so, because a silent
+#      fail-closed on an older git would disable committed hooks fleet-wide
+#      while being indistinguishable from working.
+#
+# Before any of those three, a configured core.hooksPath is VALIDATED rather
+# than short-circuited past: if it names a directory that does not exist, that
+# is reported. Order matters here, and it is the whole point - condition 1
+# returns as soon as the hooks directory is missing, so a value left behind
+# after a project drops the directory would be hidden by the same short-circuit
+# that prevents it ever being re-evaluated, and a defect that disables its own
+# detection is strictly worse than one that merely fails quietly. The blast
+# radius earns the check: git pointed at a directory that no longer exists runs
+# no committed hook and no check gate for that project, with no signal, in a
+# long-lived fleet-synced clone that is never recreated the way a crew worktree
+# is. The stale value itself is named in the warning, because a warning that
+# says something is stale without saying what is a mystery, and a mystery
+# warning gets skipped.
 #
 # The value written is RELATIVE (.githooks), never absolute, and that is a
 # correctness requirement rather than a style choice. git config --local from a
@@ -71,12 +96,33 @@
 # fm_hooks_path_apply <target-dir> [report-conflict]: set repo-local
 # core.hooksPath in the git repo at <target-dir> when that repo carries a
 # committed hooks directory and nothing would be silently overridden. With a
-# truthy second argument a preserved conflict is reported to stderr, otherwise
-# it is left silently. Never writes global or system config. Always returns 0.
+# truthy second argument a preserved conflict, a configured value that no longer
+# exists, and a skip that leaves committed hooks not running are reported to
+# stderr, otherwise they are left silently. Never writes global or system
+# config. Always returns 0.
 fm_hooks_path_apply() {
-  local dir=$1 report=${2:-} rel=${FM_HOOKS_DIR:-.githooks} cur common legacy
+  local dir=$1 report=${2:-} rel=${FM_HOOKS_DIR:-.githooks} cur target common legacy
 
   git -C "$dir" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
+
+  # Read the effective value BEFORE condition 1 can short-circuit on the hooks
+  # directory being gone, and validate that it still points at something. A
+  # relative value re-resolves against this worktree's own root, which is what
+  # makes it safe pool-wide and also what makes it silently point at nothing
+  # once the directory stops being checked out here.
+  cur=$(git -C "$dir" config core.hooksPath 2>/dev/null || true)
+  if [ -n "$cur" ]; then
+    case "$cur" in
+      '~') target=$HOME ;;
+      '~'/*) target="$HOME/${cur#'~'/}" ;;
+      /*) target=$cur ;;
+      *) target="$dir/$cur" ;;
+    esac
+    if [ ! -d "$target" ] && [ -n "$report" ]; then
+      printf 'warning: %s has core.hooksPath set to "%s", which does not exist; no committed hook and no check gate runs there until that value is corrected or unset\n' \
+        "$dir" "$cur" >&2
+    fi
+  fi
 
   # Condition 1: committed (tracked in this worktree's index) and actually
   # checked out here with at least one file in it.
@@ -85,7 +131,6 @@ fm_hooks_path_apply() {
   [ -n "$(ls -A "$dir/$rel" 2>/dev/null)" ] || return 0
 
   # Condition 2: no conflicting value already set, in any scope.
-  cur=$(git -C "$dir" config core.hooksPath 2>/dev/null || true)
   if [ -n "$cur" ]; then
     if [ "$cur" != "$rel" ] && [ -n "$report" ]; then
       printf 'warning: %s keeps a different core.hooksPath ("%s"); leaving it unchanged, committed hooks in %s will not run\n' \
@@ -100,15 +145,26 @@ fm_hooks_path_apply() {
   # core.hooksPath and so cannot report what is being overridden. An
   # unresolvable common dir (older git without --path-format, or any other
   # rev-parse failure) leaves this guard unable to answer, so it skips the write
-  # rather than proceeding blind past the one condition protecting .git/hooks.
+  # rather than proceeding blind past the one condition protecting .git/hooks -
+  # and says why, since a silent skip here disables committed hooks for every
+  # project in the fleet while looking exactly like nothing being wrong.
   common=$(git -C "$dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
-  [ -n "$common" ] || return 0
+  if [ -z "$common" ]; then
+    if [ -n "$report" ]; then
+      printf 'warning: %s cannot resolve its git common dir (git older than 2.31 has no rev-parse --path-format; any other rev-parse failure lands here too), so the .git/hooks guard cannot answer; not setting core.hooksPath, committed hooks in %s will not run\n' \
+        "$dir" "$rel" >&2
+    fi
+    return 0
+  fi
   if [ -d "$common/hooks" ]; then
-    legacy=$(find "$common/hooks" -maxdepth 1 \( -type f -o -type l \) ! -name '*.sample' 2>/dev/null | head -n 1)
+    # Every match is named, not just the first: see the header on why an
+    # unexplained recurring block becomes noise people learn to skip.
+    legacy=$(find "$common/hooks" -maxdepth 1 \( -type f -o -type l \) ! -name '*.sample' 2>/dev/null \
+      | sed 's|.*/||' | sort | awk 'BEGIN { ORS = "" } NR > 1 { print ", " } { print }')
     if [ -n "$legacy" ]; then
       if [ -n "$report" ]; then
-        printf 'warning: %s has an active hook in %s (e.g. %s); not setting core.hooksPath, which would silently disable it\n' \
-          "$dir" "$common/hooks" "$(basename "$legacy")" >&2
+        printf 'warning: %s has active hooks in %s (%s); not setting core.hooksPath, which would silently disable them\n' \
+          "$dir" "$common/hooks" "$legacy" >&2
       fi
       return 0
     fi
