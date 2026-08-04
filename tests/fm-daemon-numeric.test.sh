@@ -13,9 +13,12 @@
 #      reason the reported operand reads "  192505" rather than "192505".
 #   2. When the disk fills, a bash builtin's output write fails and the undrained
 #      buffer is flushed into a LATER command substitution, so `$(date +%s)` and
-#      `$(wc -c ...)` come back with a stale log line APPENDED:
-#        "1784687492\n[2026-07-15T05:17:47-0300] watcher beacon stale 461s ..."
-#      A multi-line operand aborts both `[` and $(( )).
+#      `$(wc -c ...)` come back with a stale log line spliced in. The SAME
+#      incident produced BOTH orientations, which matters below because they are
+#      not equally recoverable:
+#        APPENDED   "1784687492\n[2026-07-15T05:17:47-0300] watcher beacon ..."
+#        PREPENDED  "[2026-07-15T05:17:47-0300] watcher beacon ...\n3"
+#      A multi-line operand aborts both `[` and $(( )) either way round.
 #
 # The daemon's own stderr recorded both, forever repeating from 2026-07-15:
 #   bin/fm-supervise-daemon.sh: line 725: [: ...watcher beacon stale...
@@ -32,8 +35,12 @@
 #
 # WHAT IS PINNED HERE.
 #   1. _as_int coerces a whitespace-padded value (the `wc` form) to a bare
-#      integer, and keeps the FIRST line of a buffer-polluted value (the real
-#      number under both pollutions).
+#      integer, and keeps the FIRST line of a buffer-polluted value. That
+#      first-line rule is a CONVENIENCE covering the APPENDED orientation only:
+#      under the prepended orientation the first line is the stale log line, so
+#      the real value is lost to the fallback. Nothing here relies on it. What
+#      protects a decision is where its fallback points (case 4) and, at the
+#      reported site, that the operand crosses no substitution at all (case 10).
 #   2. A genuinely unusable value falls back LOUDLY - a warning on stderr - never
 #      silently.
 #   3. _file_age survives a padded or polluted mtime/clock and returns a bare
@@ -105,7 +112,10 @@
 # - it branches on `${decision%%|*}`, not on `decision` - and closing it means
 # giving the five classifiers _into forms, which is a refactor of code this
 # incident did not touch and which the daemon's own tests pin through its stdout
-# contract. It is a known residual, not a covered case.
+# contract. It is a known residual. What IS pinned there is the direction: only
+# the literal "self" self-handles, so an unreadable decision escalates rather
+# than dropping the escalation, and
+# test_handle_wake_escalates_an_unreadable_decision measures that.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -157,8 +167,10 @@ test_as_int_strips_whitespace_padding() {
   pass "_as_int: a whitespace-padded count reads as a bare integer"
 }
 
-# The stuck-output-buffer case: the real value with a stale log line appended.
-# The first line IS the real value in both pollutions, so it is recoverable.
+# The stuck-output-buffer case, APPENDED orientation: the real value first, the
+# stale log line after it. Only this orientation is recoverable by the first-line
+# rule, and the prepended case below pins the other half so the limit is measured
+# rather than assumed.
 test_as_int_keeps_first_line_of_polluted_value() {
   local got
   got=$(_as_int "$(printf '1784687492\n%s' "$STUCK_BUFFER_LINE")" '' 'clock' 2>/dev/null)
@@ -166,7 +178,21 @@ test_as_int_keeps_first_line_of_polluted_value() {
   # Padding and pollution together: exactly the reported "[:   192505\n[2026..."
   got=$(_as_int "$(printf '  192505\n%s' "$STUCK_BUFFER_LINE")" 0 'log-size' 2>/dev/null)
   assert_out "$got" "192505" "padded AND polluted still recovers the real count"
-  pass "_as_int: a buffer-polluted value recovers its real first-line number"
+  pass "_as_int: an APPENDED buffer pollution recovers its real first-line number"
+}
+
+# The other orientation from the same incident, and the reason the daemon header
+# refuses to call first-line recovery load-bearing: here the first line IS the
+# stale log line, so the real value is NOT recovered. The fallback is what the
+# decision then runs on, which is why every liveness fallback points at action.
+test_as_int_does_not_recover_a_prepended_pollution() {
+  local got err
+  err="$(new_state as-int-prepended)/prepended.err"
+  got=$(_as_int "$(printf '%s\n3' "$STUCK_BUFFER_LINE")" "$AGE_UNKNOWN" 'in-flight' 2>"$err")
+  assert_out "$got" "$AGE_UNKNOWN" \
+    "a prepended pollution is NOT recovered; it takes the caller's fallback"
+  assert_grep "unreadable numeric value" "$err" "and it says so instead of failing quietly"
+  pass "_as_int: a PREPENDED buffer pollution falls back loudly, it is not recovered"
 }
 
 test_as_int_passes_clean_values_through() {
@@ -1057,39 +1083,58 @@ test_liveness_decisions_compare_only_variables() {
 # daemon helper always can offer an _into form, so it must.
 
 # Every function the daemon defines, harvested from the source so a helper added
-# later is covered without editing a list here. Leading whitespace is allowed
-# deliberately: the daemon defines _stat_file_mtime indented inside a
-# Darwin/Linux if-block, and an anchor at column 0 silently dropped it, which
-# made this a rule about most functions while claiming to be a rule about all of
-# them. test_daemon_fn_harvest_covers_indented_definitions checks that claim
-# rather than trusting it.
-_daemon_defined_fns() {
-  grep -oE '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*\(\)' "$DAEMON" \
-    | sed -e 's/^[[:space:]]*//' -e 's/()$//' | sort -u
+# later is covered without editing a list here. A guard that misses a definition
+# form is an instance test wearing a class-closer's label, and this one has
+# already missed one: an anchor at column 0 silently dropped _stat_file_mtime,
+# which the daemon defines indented inside a Darwin/Linux if-block. So all THREE
+# definition forms bash accepts are matched - column 0, indented, and the
+# `function name {` keyword form - and the completeness claim is CHECKED against
+# a source carrying one of each, by
+# test_daemon_fn_harvest_covers_every_definition_form, rather than asserted here.
+_daemon_defined_fns() {  # [source-file]
+  local __df_src=${1:-$DAEMON}
+  {
+    grep -oE '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\(\)' "$__df_src" \
+      | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*()$//'
+    grep -oE '^[[:space:]]*function[[:space:]]+[A-Za-z_][A-Za-z0-9_]*' "$__df_src" \
+      | sed -e 's/^[[:space:]]*function[[:space:]]*//'
+  } | sort -u
 }
 
 # The conditional lines of a `declare -f` body: any `[ ... ]` / `[[ ... ]]` test
-# (bare, or after if/while/&&/||) and any `case ... in` dispatch. Arithmetic
-# expansion is not a capture and is deliberately not matched.
+# (bare, or after if/while/&&/||), the `test ...` spelling of the same thing, and
+# any `case ... in` dispatch. Arithmetic expansion is not a capture and is
+# deliberately not matched.
 _conditional_lines() {  # <body>
-  printf '%s\n' "$1" | grep -E '\[\[? |^[[:space:]]*case .+ in[[:space:]]*$' || true
+  printf '%s\n' "$1" \
+    | grep -E '\[\[? |(^|[[:space:]])test[[:space:]]|^[[:space:]]*case .+ in[[:space:]]*$' \
+    || true
 }
 
 # Report every branched-on value in <body> that crosses a command substitution.
 # Prints one line per offender and nothing when the body is clean, so it doubles
 # as the detector under test in the positive control below.
+#
+# The assignment scan matches every form bash offers for putting a capture into a
+# variable, not just the ones this incident happened to trip over. It missed the
+# idiomatic `local v=$(...)` once for exactly that reason: it enumerated the
+# shapes already seen instead of the shapes that exist. Each form is proven
+# caught in test_liveness_decisions_branch_only_on_variables.
 _capture_offenders() {  # <body>
-  local body=$1 conds vars v assigns fns hit
+  local body=$1 conds vars v assigns fns hit decl asg_re
   conds=$(_conditional_lines "$body")
   fns=$(_daemon_defined_fns)
   # (a) a capture inline inside the conditional itself, of anything at all.
   printf '%s\n' "$conds" | grep -E '\$\([^(]' | sed 's/^/inline: /' || true
   # (b) a variable the conditional reads that was assigned from a capture of a
   #     daemon-defined function, including one nested inside the captured command.
+  #     Assignment forms: bare, any declaration keyword, and printf -v.
+  decl='(local|declare|typeset|export|readonly)[[:space:]]+'
   vars=$(printf '%s\n' "$conds" | grep -oE '\$\{?[A-Za-z_][A-Za-z0-9_]*' \
            | tr -d '${' | sort -u)
   for v in $vars; do
-    assigns=$(printf '%s\n' "$body" | grep -E "^[[:space:]]*$v=.*\\\$\(" || true)
+    asg_re="^[[:space:]]*($decl)?$v=.*\\\$\(|printf[[:space:]]+-v[[:space:]]+\"?$v\"?[[:space:]].*\\\$\("
+    assigns=$(printf '%s\n' "$body" | grep -E "$asg_re" || true)
     [ -n "$assigns" ] || continue
     for hit in $(printf '%s\n' "$assigns" | grep -oE '\$\([[:space:]]*[A-Za-z_][A-Za-z0-9_]*' \
                    | sed 's/^\$([[:space:]]*//' | sort -u); do
@@ -1104,14 +1149,35 @@ _capture_offenders() {  # <body>
 # A helper the harvest misses is invisible to the rule: a future liveness
 # decision doing `m=$(_stat_file_mtime ...)` and branching on "$m" would pass
 # while carrying exactly the defect the rule exists to forbid.
-# The positive control is the old column-0 anchor: if it ever stops missing the
-# indented definition, this case is no longer distinguishing the two harvests
-# and would pass while measuring nothing.
-test_daemon_fn_harvest_covers_indented_definitions() {
-  local harvested col0
+#
+# A guard that claims to cover every definition form has to demonstrate it finds
+# a known case of every form, so the first half feeds it a source carrying one of
+# each. The second half holds it to the real daemon, with the old column-0 anchor
+# as the positive control: if that anchor ever stops missing the indented
+# definition, this case is no longer distinguishing the two harvests and would
+# pass while measuring nothing.
+test_daemon_fn_harvest_covers_every_definition_form() {
+  local dir src harvested col0
+  dir=$(new_state fn-harvest)
+  src="$dir/forms.sh"
+  {
+    printf 'col0_form() { :; }\n'
+    printf '  indented_form() { :; }\n'
+    printf 'spaced_form () { :; }\n'
+    printf 'function keyword_form {\n  :\n}\n'
+  } > "$src"
+  harvested=$(_daemon_defined_fns "$src")
+  printf '%s\n' "$harvested" | grep -qxF col0_form \
+    || fail "the harvest misses a column-0 definition"
+  printf '%s\n' "$harvested" | grep -qxF indented_form \
+    || fail "the harvest misses an indented definition"
+  printf '%s\n' "$harvested" | grep -qxF spaced_form \
+    || fail "the harvest misses a definition with a space before its parens"
+  printf '%s\n' "$harvested" | grep -qxF keyword_form \
+    || fail "the harvest misses a 'function name {' definition"
+
   harvested=$(_daemon_defined_fns)
   col0=$(grep -oE '^[A-Za-z_][A-Za-z0-9_]*\(\)' "$DAEMON" | sed 's/()$//' | sort -u)
-
   printf '%s\n' "$col0" | grep -qxF _stat_file_mtime \
     && fail "the column-0 anchor now finds the indented definition, so this case measures nothing"
   printf '%s\n' "$harvested" | grep -qxF _stat_file_mtime \
@@ -1120,36 +1186,70 @@ test_daemon_fn_harvest_covers_indented_definitions() {
     || fail "the harvest lost the unindented definitions it already covered"
   [ "$(printf '%s\n' "$harvested" | grep -c .)" -gt "$(printf '%s\n' "$col0" | grep -c .)" ] \
     || fail "the widened harvest is no larger than the column-0 one"
-  pass "daemon fn harvest: indented definitions are covered, so the rule below covers every helper"
+  pass "daemon fn harvest: every definition form is covered, so the rule below covers every helper"
 }
 
-# The positive control is the detector itself, driven against two synthetic
-# bodies that carry the exact shapes it exists to catch. If the harvesting, the
-# conditional match or the assignment scan ever stops working, this case fails
-# here rather than passing while measuring nothing across the real bodies.
+# The positive control is the detector itself, driven against a synthetic body
+# for EVERY capture form bash offers, because the two holes this guard has had
+# were both a form it did not know about rather than a rule it got wrong. If the
+# harvesting, the conditional match or any branch of the assignment scan ever
+# stops working, this case fails here rather than passing while measuring nothing
+# across the real bodies.
 test_liveness_decisions_branch_only_on_variables() {
-  local fn body offenders conds
+  local fn body offenders conds form
+  # Each entry is a body written the way `declare -f` renders it, carrying one
+  # capture form of a DAEMON-DEFINED helper feeding one conditional.
   offenders=$(_capture_offenders 'fake_inline ()
 {
     [ -s "$(_file_age /tmp/x)" ] || return 1
 }')
   [ -n "$offenders" ] || fail "the detector missed an inline capture inside a conditional"
-  offenders=$(_capture_offenders 'fake_indirect ()
+  offenders=$(_capture_offenders 'fake_bare ()
 {
     q=$(_file_age /tmp/x);
     [ -s "$q" ] || return 1
 }')
-  [ -n "$offenders" ] || fail "the detector missed a conditional reading a captured daemon helper"
+  [ -n "$offenders" ] || fail "the detector missed a bare v=\$(...) assignment"
+  for form in local declare typeset export readonly; do
+    offenders=$(_capture_offenders "fake_${form} ()
+{
+    $form q=\$(_file_age /tmp/x);
+    [ -s \"\$q\" ] || return 1
+}")
+    [ -n "$offenders" ] || fail "the detector missed a '$form v=\$(...)' assignment"
+  done
+  offenders=$(_capture_offenders 'fake_printf_v ()
+{
+    printf -v q "$(_file_age /tmp/x)";
+    [ -s "$q" ] || return 1
+}')
+  [ -n "$offenders" ] || fail "the detector missed a 'printf -v v \$(...)' assignment"
+  offenders=$(_capture_offenders 'fake_test_builtin ()
+{
+    q=$(_file_age /tmp/x);
+    test -s "$q" || return 1
+}')
+  [ -n "$offenders" ] || fail "the detector missed a capture branched on by the 'test' builtin"
+  # The permitted case, asserted so the rule stays a rule about daemon helpers:
+  # an external command cannot offer an _into form, so its capture is allowed and
+  # its value is coerced or fails toward action instead.
   offenders=$(_capture_offenders 'fake_external ()
 {
     q=$(cat /tmp/x);
     [ -s "$q" ] || return 1
 }')
   [ -z "$offenders" ] || fail "the detector flagged an unavoidable external-command capture"
+  offenders=$(_capture_offenders 'fake_external_local ()
+{
+    local q=$(cat /tmp/x);
+    [ -s "$q" ] || return 1
+}')
+  [ -z "$offenders" ] || fail "the detector flagged an external capture in a local assignment"
 
-  for fn in _backstop_should_arm throttle_ready poke_should_fire poke_session \
-            _poke_oldest_age_into _poke_queue_sig_into handle_wake housekeeping \
-            trim_log; do
+  for fn in _backstop_should_arm ensure_watcher_backstop throttle_ready \
+            poke_should_fire poke_session _poke_oldest_age_into \
+            _poke_queue_sig_into window_for_task_into inject_msg _inject_marked \
+            handle_wake housekeeping escalate_flush trim_log; do
     body=$(declare -f "$fn") \
       || fail "$fn is not defined, so this case measures nothing"
     conds=$(_conditional_lines "$body")
@@ -1160,6 +1260,76 @@ test_liveness_decisions_branch_only_on_variables() {
       || fail "$fn branches on a value read across a command substitution: $offenders"
   done
   pass "liveness decisions: no branched-on value crosses a capture, numbers, paths and strings alike"
+}
+
+# The queue head is read with an external `head`, which the rule permits, so the
+# protection has to be the DIRECTION of its failure. Pre-fix an unreadable head
+# was mapped onto -1, the same value that means "the queue is empty", so the one
+# mechanism that re-invokes the LLM session read its own confusion as an
+# all-clear and said nothing about it. This drives the prepended orientation of
+# the field pollution onto that capture.
+test_poke_fires_when_the_queue_head_is_unreadable() {
+  local state err got
+  state=$(new_state poke-unreadable-head)
+  err="$state/poke-unreadable-head.err"
+  printf '%s\n1784687492\t1\tsignal\tfoo-x1\tsignal: foo-x1\n' "$STUCK_BUFFER_LINE" \
+    > "$state/.wake-queue"
+  _poke_oldest_age_into got "$state" 2>"$err"
+  assert_out "$got" "$AGE_UNKNOWN" \
+    "an unreadable queue head reads as very old, not as an empty queue"
+  assert_grep "unreadable numeric value" "$err" \
+    "and it warns, so the read failure is not invisible"
+  poke_should_fire "$state" 2>>"$err" \
+    || fail "the stranded-wake poke fell silent on an unreadable queue head"
+  pass "_poke_oldest_age_into: an unreadable queue head warns and fires, it does not read as empty"
+}
+
+# The other half of the same split, and the reason it is a split rather than one
+# value: "nothing is queued" must stay silent, and must not start warning.
+test_poke_stays_silent_on_an_empty_queue() {
+  local state err got
+  state=$(new_state poke-empty-queue)
+  err="$state/poke-empty-queue.err"
+  _poke_oldest_age_into got "$state" 2>"$err"
+  assert_out "$got" "-1" "a missing queue is nothing to do, not an unreadable value"
+  : > "$state/.wake-queue"
+  _poke_oldest_age_into got "$state" 2>>"$err"
+  assert_out "$got" "-1" "an empty queue is nothing to do"
+  assert_no_grep "unreadable numeric value" "$err" "and an empty queue warns about nothing"
+  if poke_should_fire "$state" 2>>"$err"; then
+    fail "the stranded-wake poke fired with nothing queued"
+  fi
+  pass "_poke_oldest_age_into: an empty queue stays quiet, distinctly from an unreadable one"
+}
+
+# _window_stale_key_into exists to build the stale-marker key with no capture at
+# all, which means it MIRRORS window_to_task + _stale_key rather than calling
+# them. A mirror can drift, so it is pinned against the pair it copies.
+test_window_stale_key_matches_the_composed_captures() {
+  local win got want
+  for win in sess:fm-foo-x1 firstmate:fm-fix-login-k3 s:fm-a.b/c fm-bare plain; do
+    _window_stale_key_into got "$win"
+    want=$(_stale_key "$(window_to_task "$win")")
+    assert_out "$got" "$want" "the capture-free key disagrees with window_to_task + _stale_key for '$win'"
+  done
+  pass "_window_stale_key_into: the capture-free key matches the pair it mirrors"
+}
+
+# handle_wake reads its decision from a classifier's stdout, which is the one
+# branched-on capture the structural rule cannot close without refactoring the
+# classifiers. So the DIRECTION is what is pinned: an unreadable decision must
+# escalate, never self-handle, because self-handling drops the escalation.
+test_handle_wake_escalates_an_unreadable_decision() {
+  local state saved buf
+  state=$(new_state handle-wake-direction)
+  saved=$(declare -f classify_check)
+  eval "classify_check() { printf '%s\nescalate|check: merged' \"\$STUCK_BUFFER_LINE\"; }"
+  FM_ESCALATE_BATCH_SECS=600 handle_wake "check: pr merged" "$state" >/dev/null 2>&1
+  eval "$saved"
+  buf="$state/.subsuper-escalations"
+  [ -s "$buf" ] \
+    || fail "a decision carrying a prepended buffer flush was self-handled, so the escalation was lost"
+  pass "handle_wake: an unreadable classifier decision escalates instead of falling silent"
 }
 
 # A working-path control for the rewritten poke helpers, not a discriminator:
@@ -1247,6 +1417,7 @@ test_sleep_cadences_are_read_through_the_positive_floor() {
 
 test_as_int_strips_whitespace_padding
 test_as_int_keeps_first_line_of_polluted_value
+test_as_int_does_not_recover_a_prepended_pollution
 test_as_int_passes_clean_values_through
 test_as_int_falls_back_loudly_on_garbage
 test_as_int_rejects_near_misses
@@ -1287,8 +1458,12 @@ test_backstop_arms_when_the_beacon_age_capture_is_polluted
 test_backstop_arms_when_the_grace_capture_is_polluted
 test_poke_fires_when_its_operand_captures_are_polluted
 test_liveness_decisions_compare_only_variables
-test_daemon_fn_harvest_covers_indented_definitions
+test_daemon_fn_harvest_covers_every_definition_form
 test_liveness_decisions_branch_only_on_variables
+test_poke_fires_when_the_queue_head_is_unreadable
+test_poke_stays_silent_on_an_empty_queue
+test_window_stale_key_matches_the_composed_captures
+test_handle_wake_escalates_an_unreadable_decision
 test_poke_reads_the_queue_path_without_a_capture
 test_env_pos_int_floors_non_positive_cadences
 test_env_pos_int_warns_on_a_non_positive_cadence

@@ -224,7 +224,15 @@ AFK_FLAG_NAME=".afk"
 # Resolve the effective state dir. FM_STATE_OVERRIDE wins (testing); otherwise
 # $FM_HOME/state. Kept as a function so the pure
 # classifiers can take an explicit state arg without depending on globals.
-_state_root() { printf '%s' "${FM_STATE_OVERRIDE:-$FM_HOME/state}"; }
+# Every state path the daemon then branches on hangs off this value, so it is
+# assigned into a caller-scope variable like every other branched-on value: a
+# flush on a capture of it would point the afk probe and the marker reads at a
+# directory that does not exist, which reads as "nothing to do".
+_state_root_into() { printf -v "$1" '%s' "${FM_STATE_OVERRIDE:-$FM_HOME/state}"; }
+
+# The stdout form. No production caller is left in this file; kept for the unit
+# tests that pin the resolution rule, as the coercion note below explains.
+_state_root() { local __sr_v; _state_root_into __sr_v; printf '%s' "$__sr_v"; }
 
 # --- portable stat (same trap as fm-watch.sh: no `stat -f || stat -c`) -------
 if [ "$(uname)" = Darwin ]; then
@@ -287,6 +295,40 @@ fi
 # form because `declare -n` does not exist on macOS bash 3.2, which this daemon
 # has to keep running on. Locals are prefixed per function so a caller's own
 # variable name cannot collide with them.
+#
+# THE CAPTURE SWEEP. Three rounds of review found this defect three times, in
+# three different operands, because each was ruled on as an instance. So every
+# command substitution left on the supervision path is accounted for below, and
+# each one is in exactly one of three states. Anything that fits none of them is
+# a defect, not an exception, and the structural cases in
+# tests/fm-daemon-numeric.test.sh enforce the rule the inventory records.
+#
+#   (a) REMOVED. The value is produced without a substitution at all.
+#       _in_flight_count_into (glob loop), _wake_queue_path_into,
+#       _window_stale_key_into, _state_root_into and _stamp_now all assign
+#       through printf -v, so _backstop_should_arm, throttle_ready and
+#       window_for_task_into compare operands that cannot be polluted.
+#   (b) COERCED. An external command is the only way to read the value, and what
+#       it returns goes through _as_int_into before any comparison.
+#       _now_into ($(date)), _file_age_into ($(_stat_file_mtime), a one-line
+#       wrapper over stat), trim_log ($(wc -c)), escalate_flush ($(wc -l)),
+#       poke_session ($(wc -l), validated inline), housekeeping's stale-marker
+#       $(cat), and _poke_oldest_age_into's $(head -1) via _age_since_into.
+#   (c) FAILS TOWARD ACTION. The value stays a capture and an unreadable one
+#       makes the daemon act rather than go quiet. _poke_queue_sig_into and
+#       poke_should_fire's $(cat) of the last signature (a polluted digest
+#       cannot match, so the poke is re-permitted), housekeeping's seen-status
+#       and secondmate_deadturn_probe's dedupe $(cat) (a mismatch escalates),
+#       _inject_marked's $(fm_tmux_submit_core) verdict (anything but "empty"
+#       is unconfirmed, so the buffer is preserved and retried), handle_wake's
+#       classifier decision (anything but "self" escalates), and
+#       window_for_task_into's $(tmux list-windows) (a flush costs one recheck
+#       cycle; the next stale wake re-records the marker).
+#
+# Message text is not a decision and is not swept: $(_age_phrase ...), $(date)
+# and $(basename ...) inside a log line or a digest can only garble the line
+# they are printed in. Startup is not swept either: $(discover_supervisor_target)
+# is validated against tmux immediately and a bad target exits loudly.
 _as_int_into() {  # <outvar> <raw> <fallback> [context]
   local __ai_out=$1 __ai_raw=$2 __ai_fb=$3 __ai_ctx=${4:-value} __ai_v __ai_digits
   __ai_v=${__ai_raw%%$'\n'*}                      # first line only
@@ -729,16 +771,39 @@ classify_unknown() {  # <reason>
 
 _stale_key() { printf '%s' "$1" | tr ':/.' '___'; }
 
+# The window-to-marker-key transformation with NO command substitution anywhere:
+# strip the session prefix, strip the fm- prefix, replace the three path-unsafe
+# characters. Pure parameter expansion, so it is the (a) "removed" case of the
+# capture sweep rather than a coerced or fail-toward-action one.
+#
+# It deliberately does not call window_to_task and _stale_key, because both
+# return on stdout and reading them back is the substitution boundary this
+# incident is about: the marker key gates whether a stale recheck finds its
+# window at all, and a polluted key reads as "window gone", which drops the
+# marker and escalates nothing. That is the silent direction. It mirrors those
+# two functions rather than replacing them (window_to_task is shared with
+# bin/fm-watch.sh through fm-classify-lib.sh), and
+# test_window_stale_key_matches_the_composed_captures pins the mirror against
+# drift.
+_window_stale_key_into() {  # <outvar> <window>
+  local __wk_t=${2##*:}
+  __wk_t=${__wk_t#fm-}
+  __wk_t=${__wk_t//:/_}
+  __wk_t=${__wk_t//\//_}
+  __wk_t=${__wk_t//./_}
+  printf -v "$1" '%s' "$__wk_t"
+}
+
 stale_marker_record() {  # <window> <state>  — create if absent
   local win=$1 state=$2 key marker
-  key=$(_stale_key "$(window_to_task "$win")")
+  _window_stale_key_into key "$win"
   marker="$state/.subsuper-stale-$key"
   [ -e "$marker" ] || _stamp_now "$marker"
 }
 
 stale_marker_remove() {  # <window> <state>
   local win=$1 state=$2 key
-  key=$(_stale_key "$(window_to_task "$win")")
+  _window_stale_key_into key "$win"
   rm -f "$state/.subsuper-stale-$key"
 }
 
@@ -946,7 +1011,7 @@ housekeeping() {  # <state>
   if throttle_ready "$state/.subsuper-last-scan" "$scan_gap"; then
     _stamp_now "$state/.subsuper-last-scan"
     local seen seen_last
-    while IFS="$(printf '\t')" read -r f task last; do
+    while IFS=$'\t' read -r f task last; do
       [ -n "$f" ] || continue
       seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
       seen_last=$(cat "$seen" 2>/dev/null || true)
@@ -965,12 +1030,20 @@ housekeeping() {  # <state>
 # torn down" from "task still there", and a polluted capture would read as a live
 # window whose pane probe then fails, turning a benign teardown into a wedge
 # escalation.
+#
+# The compared key is built by _window_stale_key_into, so neither side of the
+# match crosses a substitution. Pre-fix it was two nested captures of
+# daemon-defined helpers, and a flush on either one made the window fail to
+# match, which housekeeping reads as "task torn down": it drops the stale marker
+# and escalates nothing. That direction is silence, so the capture had to go.
+# The window LIST stays a capture because tmux is an external command and cannot
+# be anything else; a flush there costs one recheck cycle, since the next stale
+# wake re-records the marker.
 window_for_task_into() {  # <outvar> <task-key>
-  local __wf_out=$1 __wf_key=$2 __wf_w __wf_t __wf_k
+  local __wf_out=$1 __wf_key=$2 __wf_w __wf_k
   printf -v "$__wf_out" '%s' ''
   for __wf_w in $(tmux list-windows -a -F '#{session_name}:#{window_name}' 2>/dev/null | grep ':fm-' || true); do
-    __wf_t=$(window_to_task "$__wf_w")
-    __wf_k=$(_stale_key "$__wf_t")
+    _window_stale_key_into __wf_k "$__wf_w"
     [ "$__wf_k" = "$__wf_key" ] && { printf -v "$__wf_out" '%s' "$__wf_w"; return 0; }
   done
   return 1
@@ -1041,7 +1114,8 @@ _inject_marked() {  # <message> <target>
 
 inject_msg() {  # <message> [state]
   local msg=$1 state target
-  state="${2:-$(_state_root)}"
+  state=${2:-}
+  [ -n "$state" ] || _state_root_into state
   # Presence-gate: escalations inject ONLY when afk is active. When afk is off,
   # the daemon self-handles and stays quiet; firstmate drives the normal always-on
   # watcher triage. Escalations buffer and survive for the next catch-up flush.
@@ -1145,16 +1219,33 @@ _wake_queue_path_into() {  # <outvar> <state>
 # Age (seconds) of the OLDEST queued wake, or -1 when the queue is empty/missing.
 # The queue is append-ordered "epoch<TAB>seq<TAB>...", so the first line's epoch
 # is the oldest pending wake.
+#
+# TWO SITUATIONS, TWO VALUES, deliberately never the same one:
+#   -1            "there is nothing queued". The queue is genuinely empty or
+#                 missing, so there is nothing to poke about and silence is the
+#                 right answer.
+#   AGE_UNKNOWN   "there IS something queued and its head cannot be read". The
+#                 head line survived a stuck-buffer flush, or the file is
+#                 malformed. That is not an all-clear, it is the daemon failing
+#                 to read work it can see, so it warns through _int_warn and
+#                 reads as very old, which fires the poke.
+# Collapsing the second onto -1 is what made this fail toward SILENCE: the head
+# is read with an external `head`, so the prepended orientation of the field
+# pollution ("<stale log line>\n<real record>") leaves no tab in the first line,
+# any epoch test rejects it, and the one mechanism that re-invokes the LLM
+# session went quiet with nothing on stderr. The cost of the split is a poke
+# telling the captain to drain a queue that may not need draining; the benefit
+# is that a stranded queue can never be silently ignored.
+#
+# So the epoch goes straight into _age_since_into, which coerces it (recovering
+# the appended orientation), warns when it cannot, and falls back to the very-old
+# sentinel. No test rejects the value to a quiet number in between.
 _poke_oldest_age_into() {  # <outvar> <state>
   local __po_out=$1 __po_state=$2 __po_queue __po_first __po_epoch
   _wake_queue_path_into __po_queue "$__po_state"
   [ -s "$__po_queue" ] || { printf -v "$__po_out" '%s' -1; return; }
   __po_first=$(head -1 "$__po_queue" 2>/dev/null)
   __po_epoch=${__po_first%%$'\t'*}
-  case "$__po_epoch" in ''|*[!0-9]*) printf -v "$__po_out" '%s' -1; return ;; esac
-  # Via _age_since_into, so an unusable clock reads as very old and the
-  # stranded-wake poke still fires. This is the one mechanism that re-invokes the
-  # LLM session, so it must never fail toward silence.
   _age_since_into "$__po_out" "$__po_epoch" 'wake-queue'
 }
 
@@ -1199,6 +1290,9 @@ poke_should_fire() {  # <state>
   _env_int_into min_interval FM_POKE_MIN_INTERVAL "$POKE_MIN_INTERVAL_DEFAULT"
   [ "$throttle" -ge "$min_interval" ] || return 1
   _poke_queue_sig_into sig "$state"
+  # Sweep case (c): an external $(cat) whose pollution re-permits the poke, since
+  # a polluted signature cannot equal the stored one. The comparison is inequality
+  # for that reason, and inverting it would put the poke back behind silence.
   last_sig=$(cat "$state/.subsuper-poke-sig" 2>/dev/null || true)
   [ "$sig" != "$last_sig" ]
 }
@@ -1332,7 +1426,16 @@ handle_wake() {  # <reason> <state>
   esac
   action=${decision%%|*}
   distilled=${decision#*|}
-  if [ "$action" = "escalate" ]; then
+  # The classifiers return their decision on stdout, so `action` is the one
+  # branched-on value here that still crosses a substitution: they have no _into
+  # form, and giving them one is a refactor of code this incident did not touch
+  # and whose stdout contract the daemon's own tests pin. What IS in scope is the
+  # DIRECTION, and it used to point at silence: a `[ "$action" = "escalate" ]`
+  # test reads a prepended stuck-buffer flush as neither verb and self-handles,
+  # dropping the escalation. Only the literal "self" self-handles now, so an
+  # unreadable decision escalates, exactly as classify_unknown already does with
+  # an unrecognised wake.
+  if [ "$action" != "self" ]; then
     log "escalate: $reason -> $distilled"
     escalate_add "$state" "$distilled"
     # A terminal-stale escalate must not leave a persistence marker behind, or
@@ -1363,6 +1466,10 @@ trim_log() {
   _as_int_into sz "$raw" 0 'log-size'
   _env_int_into max FM_LOG_MAX_BYTES "$LOG_MAX_BYTES_DEFAULT"
   [ "$sz" -ge "$max" ] || return 0
+  # Branched on mktemp's STATUS, not on the captured path, and a polluted path
+  # makes the tail write below fail so the log is left untrimmed rather than
+  # replaced from a bad source. That is the non-destructive direction for a
+  # value that only ever names a scratch file.
   tmp=$(mktemp "${TMPDIR:-/tmp}/fm-daemon-log.XXXXXX") || return 0
   _env_int_into keep FM_LOG_KEEP_LINES "$LOG_KEEP_LINES_DEFAULT"
   tail -n "$keep" "$LOG" >"$tmp" 2>/dev/null && mv -f "$tmp" "$LOG"
@@ -1375,7 +1482,7 @@ trim_log() {
 
 fm_super_main() {
   local STATE
-  STATE="$(_state_root)"
+  _state_root_into STATE
   mkdir -p "$STATE"
   # Where _int_warn keeps its per-context stderr throttle markers. Global (not
   # local) so command substitutions see it; unset when the pure functions are
