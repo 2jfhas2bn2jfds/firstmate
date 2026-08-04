@@ -359,9 +359,11 @@ if [ "$KIND" != secondmate ]; then
   if fm_pane_is_busy "$WIN"; then
     emit working pane "harness busy"
   # A claude crew that ended its turn but is idle-waiting on its OWN running
-  # background shell (a pipeline, an RN build) shows no busy spinner, only a
-  # background-shell footer. That footer means it is still working, so treat it
-  # as busy too. Gated on harness=claude because the footer form is claude's.
+  # background shell (a pipeline, an RN build) or background monitor shows no
+  # busy spinner, only a background-shell footer, which claude renders as one
+  # comma-separated list ("2 shells, 1 monitor still running") when both are
+  # running. That footer means it is still working, so treat it as busy too.
+  # Gated on harness=claude because the footer form is claude's.
   elif [ "$HARNESS" = claude ] && fm_pane_has_bg_shell "$WIN"; then
     emit working pane "background shell running"
   fi

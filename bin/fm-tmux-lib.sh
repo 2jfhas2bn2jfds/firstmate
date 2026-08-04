@@ -196,10 +196,11 @@ fm_pane_is_busy() {  # <target>
     | grep -qiE "${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}"
 }
 
-# fm_pane_has_bg_shell: 0 if the pane's footer shows a running background shell
-# (the claude idle-but-working signature described at FM_TMUX_BG_SHELL_REGEX_DEFAULT
-# above). Scans the same last-few-non-blank-lines footer tail as fm_pane_is_busy,
-# so the match cannot be tripped by shell talk buried in the transcript body.
+# fm_pane_has_bg_shell: 0 if the pane's footer shows a running background shell or
+# monitor (the claude idle-but-working signature described at
+# FM_TMUX_BG_SHELL_REGEX_DEFAULT above). Scans the same last-few-non-blank-lines
+# footer tail as fm_pane_is_busy, so the match cannot be tripped by shell talk
+# buried in the transcript body.
 # Claude-specific: the caller (fm-crew-state.sh) consults this only for a
 # harness=claude target; the function itself stays a pure text test.
 fm_pane_has_bg_shell() {  # <target>

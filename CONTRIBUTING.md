@@ -71,7 +71,7 @@ tests/fm-watcher-lock.test.sh             # watcher singleton, lock-race, watch-
 tests/fm-watch-triage.test.sh             # always-on watcher triage: benign absorb, actionable surface, stale wedge threshold, heartbeat backstop, and afk one-shot coherence
 tests/fm-daemon.test.sh                   # sub-supervisor classifier, /afk presence-gating, max-defer, composer, and fm-send submit tests
 tests/fm-liveness-daemon.test.sh          # always-on (present-mode) liveness layer: watcher-liveness backstop, stranded-wake session-poke matrix, and secondmate dead-turn probe tests
-tests/fm-daemon-numeric.test.sh           # daemon numeric-value hardening: whitespace-padded and stuck-output-buffer values coerced, unusable values warned loudly, and the watcher-liveness backstop still arming under a polluted beacon read
+tests/fm-daemon-numeric.test.sh           # daemon numeric-value hardening: whitespace-padded and stuck-output-buffer values coerced, unusable values warned loudly, no invented epochs, throttled actions firing every tick under an unreadable clock, positive-floored sleep cadences, unknown durations never printed as seconds, structural guards that liveness decisions compare only variables, and the watcher-liveness backstop still arming under a polluted beacon read
 tests/fm-send-settle.test.sh              # fm-send post-submit settle pause, tuning, disable, and --key bypass tests
 tests/fm-send-popup-settle.test.sh        # fm-send pre-Enter popup-settle selection for slash commands and codex $skill invocations
 tests/fm-send-secondmate-marker.test.sh   # fm-send from-firstmate marker for kind=secondmate targets: marked vs crewmate/explicit/--key, and the exact marker byte sequence

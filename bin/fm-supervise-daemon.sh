@@ -127,6 +127,15 @@
 #                                   (default 0.5)
 #          FM_LOG_MAX_BYTES / FM_LOG_KEEP_LINES / FM_CRASH_*  log + crash guards
 #          FM_STATE_OVERRIDE        alternate state dir (testing)
+#          Every numeric knob above is coerced before it reaches a comparison
+#          (see the coercion note below): a padded or buffer-polluted value is
+#          trimmed, an unusable one falls back LOUDLY, and the integer cadences
+#          that feed `sleep` (FM_PRESENT_TICK, FM_HOUSEKEEPING_TICK,
+#          FM_INJECT_FAIL_SLEEP, FM_CRASH_BACKOFF, FM_CRASH_NORMAL_SLEEP) also
+#          fall back when non-positive; the fractional FM_INJECT_CONFIRM_SLEEP
+#          is validated as a non-negative decimal instead. An
+#          unreadable clock reads as a very old age, so throttled actions such
+#          as the backstop arm fire on every tick instead of going quiet.
 #          Logs each wake to state/.supervise-daemon.log (size-capped). Single
 #          instance via portable lock on state/.supervise-daemon.lock. Trapped
 #          SIGTERM/SIGINT shut down within ~1s, flush escalations, release the

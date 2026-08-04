@@ -222,7 +222,7 @@ FM_WATCH_TRIAGE_LOG_MAX_BYTES=262144   # size cap for the watcher's absorbed-wak
 FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=20   # seconds allowed for bootstrap's best-effort clone refresh
 FM_FLEET_PRUNE=1        # set to 0 to skip pruning local branches whose upstream is gone
 FM_BUSY_REGEX='esc (to )?interrupt|Working\.\.\.'   # busy-pane signatures, shared by watcher and tmux helper
-FM_BG_SHELL_REGEX='[0-9]+[[:space:]]+shells?[[:space:]]+still[[:space:]]+running|·[[:space:]]*[0-9]+[[:space:]]+shells?([[:space:]]|$)'   # claude background-shell footer signature; fm-crew-state.sh counts it as working for harness=claude panes
+FM_BG_SHELL_REGEX='[0-9]+[[:space:]]+(shell|monitor)s?([[:space:]]*,[[:space:]]*[0-9]+[[:space:]]+(shell|monitor)s?)*[[:space:]]+still[[:space:]]+running|·[[:space:]]*[0-9]+[[:space:]]+(shell|monitor)s?([[:space:],]|$)'   # claude background shell/monitor footer signature, including the comma-separated "2 shells, 1 monitor still running" list; fm-crew-state.sh counts it as working for harness=claude panes
 FM_COMPOSER_IDLE_RE=    # optional empty-composer regex, applied after dim-ghost and border stripping
 FM_SEND_RETRIES=3       # fm-send Enter-retry attempts after typing the line once
 FM_SEND_SLEEP=0.4       # seconds between fm-send submit checks
@@ -250,4 +250,14 @@ FM_BACKSTOP_ARM_THROTTLE=30        # present mode: min seconds between backstop 
 FM_SECONDMATE_DEADTURN_RE='API Error|ConnectionRefused'   # OR-ed harness dead-turn signatures probed in idle secondmate panes
 FM_SECONDMATE_PROBE_TICK=          # seconds between secondmate dead-turn probes; defaults to FM_HOUSEKEEPING_TICK
 FM_WATCH_ARM_BIN=bin/fm-watch-arm.sh   # watcher-arm script the present-mode backstop launches, mainly for tests
+FM_INT_WARN_INTERVAL_MIN=10        # minutes between repeated stderr warnings about the same unreadable numeric value; the daemon log records every occurrence
 ```
+
+Every numeric value the liveness daemon compares - an override read from this list, a `stat`/`date`/`wc` result, or an epoch stored in a marker - is coerced before it reaches a comparison.
+A padded value (BSD `wc` left-pads its count) is trimmed, and a value polluted by a stuck output buffer keeps its first line only.
+A value that still is not an integer falls back and says so: an `ERROR` line in `state/.supervise-daemon.log` for every occurrence, plus one stderr line per value per `FM_INT_WARN_INTERVAL_MIN` minutes.
+The fallbacks point at action rather than silence, because the full disk that pollutes these reads is exactly when supervision must not go quiet: an unmeasurable age reads as very old, so the watcher-liveness backstop re-arms and the stranded-wake poke fires, and an unreadable clock makes every throttled action run on each tick instead of waiting out a gap it cannot measure.
+The daemon never invents an epoch: a marker it cannot stamp is truncated rather than filled with a fabricated timestamp, and captain-facing text names an unmeasurable age as an unknown duration instead of printing the sentinel as seconds.
+The integer cadences that feed `sleep` (`FM_PRESENT_TICK`, `FM_HOUSEKEEPING_TICK`, `FM_INJECT_FAIL_SLEEP`, `FM_CRASH_BACKOFF`, `FM_CRASH_NORMAL_SLEEP`) are additionally floored positive: a zero or negative value would turn the loop they pace into a spin, so it falls back to the default shown above and warns.
+The one fractional knob, `FM_INJECT_CONFIRM_SLEEP`, is checked as a plain non-negative decimal instead, since `sleep` fails outright on a malformed argument.
+Thresholds that only feed a comparison (`FM_ESCALATE_BATCH_SECS`, `FM_MAX_DEFER_SECS`, `FM_SECONDMATE_PROBE_TICK`) keep accepting `0`, where it is a meaningful setting.

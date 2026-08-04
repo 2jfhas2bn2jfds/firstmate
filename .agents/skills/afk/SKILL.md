@@ -247,6 +247,17 @@ These properties must hold:
 - Nothing is lost. The durable queue plus `fm-wake-drain.sh` recover any missed
   or crashed injection.
 - Wedge detection is bounded-latency, not lossy.
+- No liveness check goes quiet on an unreadable number. Every value a decision
+  compares (a `stat`/`date`/`wc` result, a marker epoch, an env override) is
+  coerced first, since a padded or output-buffer-polluted value aborts a bare
+  `[ ... -ge ... ]` and disables the check silently. An unreadable one warns
+  loudly (an `ERROR` per occurrence in the daemon log, stderr throttled by
+  `FM_INT_WARN_INTERVAL_MIN`, default 10 minutes) and falls back toward acting:
+  an unmeasurable age reads as very old, so throttled actions such as the
+  backstop re-arm and the wedge alarm fire on every tick rather than waiting out
+  a gap the daemon cannot measure. A marker that cannot be stamped is truncated
+  instead of holding a fabricated epoch, and an unmeasurable age is reported as
+  an unknown duration rather than printed as seconds.
 - The catch-all scan backs up the keyword classifier.
 - The daemon preserves a single-instance portable lock, crash-loop backoff,
   a pane-gone guard, and a signal-trapped shutdown that flushes buffered
