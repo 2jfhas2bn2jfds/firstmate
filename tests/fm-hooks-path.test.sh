@@ -217,6 +217,7 @@ test_preserves_non_local_scope_value() {
   # GIT_CONFIG_GLOBAL is what the suite-wide fm_git_isolate pins to /dev/null and
   # it outranks HOME, so this test points it at the fixture rather than relying
   # on HOME alone.
+  # shellcheck disable=SC2030 # the subshell-local scope is the point: the fixture must not leak.
   out=$(
     export GIT_CONFIG_GLOBAL="$fakehome/.gitconfig" \
       HOME="$fakehome" XDG_CONFIG_HOME="$fakehome/.config" GIT_CONFIG_NOSYSTEM=1
@@ -295,6 +296,7 @@ test_stale_check_is_scoped() {
   fakehome="$TMP_ROOT/scope-global-home"
   mkdir -p "$fakehome"
   printf '[core]\n\thooksPath = %s/absent-global-hooks\n' "$fakehome" > "$fakehome/.gitconfig"
+  # shellcheck disable=SC2030,SC2031 # the subshell-local scope is the point: the fixture must not leak.
   out=$(
     export GIT_CONFIG_GLOBAL="$fakehome/.gitconfig" \
       HOME="$fakehome" XDG_CONFIG_HOME="$fakehome/.config" GIT_CONFIG_NOSYSTEM=1

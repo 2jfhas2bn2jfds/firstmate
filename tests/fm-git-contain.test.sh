@@ -39,7 +39,6 @@ fm_git_identity fmtest fmtest@example.invalid
 fm_git_isolate
 
 TMP_ROOT=$(fm_test_tmproot fm-git-contain)
-BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 HOOK_DIR='.githooks'
 N=0
 
