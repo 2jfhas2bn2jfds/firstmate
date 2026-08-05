@@ -99,7 +99,9 @@ SH
   FM_WATCH_ARM_BIN="$dir/fake-arm.sh" ensure_watcher_backstop "$state"
   i=0
   while [ "$i" -lt 20 ] && [ ! -s "$armlog" ]; do sleep 0.1; i=$((i + 1)); done
-  n=$(grep -c armed "$armlog" 2>/dev/null || echo 0)
+  # `grep -c` PRINTS 0 and EXITS 1 on no match, so `|| echo 0` would make $n the
+  # two-line "0\n0" and report a count no arm ever produced.
+  n=$(grep -c armed "$armlog" 2>/dev/null) || n=0
   [ "$n" = 1 ] || fail "backstop launched $n times within the throttle window (expected 1)"
   pass "ensure_watcher_backstop throttles a burst to one launch"
 }
@@ -171,12 +173,13 @@ test_poke_no_fire_on_empty_queue() {
 }
 
 test_poke_dedupes_unchanged_queue() {
-  local dir state
+  local dir state sig
   dir=$(make_supercase poke-dedupe); state="$dir/state"
   _write_aged_queue "$state" 200
   # Record the CURRENT signature as already-poked; min-interval disabled so only
   # the signature dedupe can block.
-  _poke_queue_sig "$state" > "$state/.subsuper-poke-sig"
+  _poke_queue_sig_into sig "$state"
+  printf '%s\n' "$sig" > "$state/.subsuper-poke-sig"
   if FM_POKE_MIN_INTERVAL=0 poke_should_fire "$state"; then
     fail "poke re-fired for an unchanged stranded queue"
   else

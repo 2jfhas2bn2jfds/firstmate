@@ -104,6 +104,9 @@
 #          FM_WATCH_ARM_BIN         watcher-arm script the backstop launches
 #                                   (override for tests; default the sibling
 #                                   bin/fm-watch-arm.sh)
+#          FM_INT_WARN_INTERVAL_MIN minutes between repeated stderr warnings for
+#                                   the SAME unreadable numeric value; the daemon
+#                                   log records every occurrence (default 10)
 #          FM_BUSY_REGEX            OR-ed busy signatures (mirrors fm-watch.sh)
 #          FM_COMPOSER_IDLE_RE      empty-composer regex applied after dim-ghost
 #                                   and structural border stripping (default:
@@ -124,6 +127,15 @@
 #                                   (default 0.5)
 #          FM_LOG_MAX_BYTES / FM_LOG_KEEP_LINES / FM_CRASH_*  log + crash guards
 #          FM_STATE_OVERRIDE        alternate state dir (testing)
+#          Every numeric knob above is coerced before it reaches a comparison
+#          (see the coercion note below): a padded or buffer-polluted value is
+#          trimmed, an unusable one falls back LOUDLY, and the integer cadences
+#          that feed `sleep` (FM_PRESENT_TICK, FM_HOUSEKEEPING_TICK,
+#          FM_INJECT_FAIL_SLEEP, FM_CRASH_BACKOFF, FM_CRASH_NORMAL_SLEEP) also
+#          fall back when non-positive; the fractional FM_INJECT_CONFIRM_SLEEP
+#          is validated as a non-negative decimal instead. An
+#          unreadable clock reads as a very old age, so throttled actions such
+#          as the backstop arm fire on every tick instead of going quiet.
 #          Logs each wake to state/.supervise-daemon.log (size-capped). Single
 #          instance via portable lock on state/.supervise-daemon.lock. Trapped
 #          SIGTERM/SIGINT shut down within ~1s, flush escalations, release the
@@ -174,6 +186,9 @@ CRASH_BACKOFF_DEFAULT=60
 CRASH_NORMAL_SLEEP_DEFAULT=5
 LOG_MAX_BYTES_DEFAULT=1048576
 LOG_KEEP_LINES_DEFAULT=2000
+# Minutes between repeated stderr warnings about the SAME unreadable numeric
+# value (see _int_warn). The daemon log records every occurrence regardless.
+INT_WARN_INTERVAL_MIN_DEFAULT=10
 
 # --- always-on (present-mode) liveness tunables -----------------------------
 # These drive the minimal liveness layer the daemon runs while afk is INACTIVE.
@@ -218,7 +233,15 @@ AFK_FLAG_NAME=".afk"
 # Resolve the effective state dir. FM_STATE_OVERRIDE wins (testing); otherwise
 # $FM_HOME/state. Kept as a function so the pure
 # classifiers can take an explicit state arg without depending on globals.
-_state_root() { printf '%s' "${FM_STATE_OVERRIDE:-$FM_HOME/state}"; }
+# Every state path the daemon then branches on hangs off this value, so it is
+# assigned into a caller-scope variable like every other branched-on value: a
+# flush on a capture of it would point the afk probe and the marker reads at a
+# directory that does not exist, which reads as "nothing to do".
+_state_root_into() { printf -v "$1" '%s' "${FM_STATE_OVERRIDE:-$FM_HOME/state}"; }
+
+# The stdout form. No production caller is left in this file; kept for the unit
+# tests that pin the resolution rule, as the coercion note below explains.
+_state_root() { local __sr_v; _state_root_into __sr_v; printf '%s' "$__sr_v"; }
 
 # --- portable stat (same trap as fm-watch.sh: no `stat -f || stat -c`) -------
 if [ "$(uname)" = Darwin ]; then
@@ -226,11 +249,356 @@ if [ "$(uname)" = Darwin ]; then
 else
   _stat_file_mtime() { stat -c %Y "$1" 2>/dev/null; }
 fi
-_now() { date +%s; }
-_file_age() {  # seconds since mtime; very large if missing
-  local f=$1 m
-  m=$(_stat_file_mtime "$f") || { echo 999999; return; }
-  echo $(( $(_now) - m ))
+# --- numeric coercion (incident daemon-rearm-fix-d8) ------------------------
+# Every liveness decision below is an integer comparison over a value read from
+# a command (stat, date, wc) or a state file, and a bare `[ "$v" -ge N ]` aborts
+# with "integer expression expected" the moment that value is not a clean
+# integer. Two real pollutions were observed in this home's own daemon stderr:
+#   - BSD `wc` LEFT-PADS its count, so `sz=$(wc -c < "$LOG")` is "  192505".
+#     Padding ALONE is tolerated by bash's `[` and by $(( )), so it is not by
+#     itself the abort; it is the carrier that made the next one fatal here.
+#   - When the disk fills, a bash builtin's output write fails and the undrained
+#     buffer is flushed into a LATER command substitution, so `$(date +%s)` and
+#     `$(wc -c ...)` come back with a stale log line spliced in. The SAME
+#     2026-07-15 incident produced BOTH orientations:
+#       APPENDED   "1784687492\n[2026-07-15T05:17:47-0300] watcher beacon ..."
+#       PREPENDED  "[2026-07-15T05:17:47-0300] watcher beacon ...\n3"
+#     A multi-line operand aborts both `[` and $(( )) either way round.
+# That killed the watcher-liveness backstop from 2026-07-15: `[` errored,
+# _backstop_should_arm returned non-zero, and a lapsed watcher chain was never
+# re-armed - for three weeks, silently, because nothing checked.
+#
+# So no comparison consumes a raw value any more. _as_int strips surrounding
+# whitespace, keeps the FIRST line, and yields a bare integer or falls back
+# LOUDLY. Be precise about what that first-line rule buys, because two of the
+# three things here are load-bearing and this is the one that is NOT:
+#   1. First-line recovery is a CONVENIENCE and covers the APPENDED orientation
+#      ONLY. Under the prepended orientation the first line is the stale log
+#      line, _as_int rejects it and falls back, so the real value is lost. Do
+#      not rely on this rule to recover a polluted read, and do not treat a
+#      decision as protected because it passes through _as_int.
+#   2. THE FALLBACK DIRECTION is what protects the decision when recovery
+#      fails. Every fallback in the liveness path is chosen to fail toward
+#      ACTION (arm the watcher) rather than toward silence, because a redundant
+#      arm is a no-op while a missed one is an outage. Change a liveness
+#      fallback to a quiet value and the 2026-07-15 outage comes back even
+#      though the coercion is untouched.
+#   3. THE ABSENCE OF COMMAND SUBSTITUTIONS is what prevents the pollution at
+#      the reported site outright. _in_flight_count_into is a pure glob loop
+#      assigning through printf -v with no $( ) anywhere, so that operand
+#      cannot be polluted at all. That is prevention, not recovery, and it is
+#      the strongest of the three.
+# Keep 2 and 3 above all else. Reintroducing a capture into a liveness decision,
+# or pointing a liveness fallback at silence, removes the real protection even
+# if the first-line rule survives intact.
+#
+# Coercing INSIDE the helper is only half of it. A value returned on stdout has
+# to be read back with $( ), and a capture is precisely where the stuck buffer
+# lands, so a stdout-returning coercion re-pollutes its own result the moment a
+# caller reads it. The field log proves the pollution reached the OUTERMOST
+# capture: the operand that aborted _backstop_should_arm was the stale log line
+# followed by "3", and that 3 was the real in-flight count the (already clean)
+# counter had just printed. So the coercion assigns into a CALLER-SCOPE variable
+# named by <outvar>, and every liveness decision below reads its operands from
+# variables, never across a substitution boundary. printf -v is the assignment
+# form because `declare -n` does not exist on macOS bash 3.2, which this daemon
+# has to keep running on. Locals are prefixed per function so a caller's own
+# variable name cannot collide with them.
+#
+# THE CAPTURE SWEEP. Three rounds of review found this defect three times, in
+# three different operands, because each was ruled on as an instance. So every
+# command substitution left on the supervision path is accounted for below, and
+# each one is in exactly one of three states. Anything that fits none of them is
+# a defect, not an exception, and the structural cases in
+# tests/fm-daemon-numeric.test.sh enforce the rule the inventory records.
+#
+#   (a) REMOVED. The value is produced without a substitution at all.
+#       _in_flight_count_into (glob loop), _wake_queue_path_into,
+#       _window_stale_key_into, _state_root_into and _stamp_now all assign
+#       through printf -v, so _backstop_should_arm, throttle_ready and
+#       window_for_task_into compare operands that cannot be polluted.
+#   (b) COERCED. An external command is the only way to read the value, and what
+#       it returns goes through _as_int_into before any comparison.
+#       _now_into ($(date)), _file_age_into ($(_stat_file_mtime), a one-line
+#       wrapper over stat), trim_log ($(wc -c)), escalate_flush ($(wc -l)),
+#       poke_session ($(wc -l), validated inline), housekeeping's stale-marker
+#       $(cat), and _poke_oldest_age_into's $(head -1) via _age_since_into.
+#   (c) FAILS TOWARD ACTION. The value stays a capture and an unreadable one
+#       makes the daemon act rather than go quiet. _poke_queue_sig_into and
+#       poke_should_fire's $(cat) of the last signature (a polluted digest
+#       cannot match, so the poke is re-permitted), housekeeping's seen-status
+#       and secondmate_deadturn_probe's dedupe $(cat) (a mismatch escalates),
+#       _inject_marked's $(fm_tmux_submit_core) verdict (anything but "empty"
+#       is unconfirmed, so the buffer is preserved and retried), handle_wake's
+#       classifier decision (anything but "self" escalates), and
+#       window_for_task_into's $(tmux list-windows) (a flush costs one recheck
+#       cycle; the next stale wake re-records the marker).
+#
+# Message text is not a decision and is not swept: $(_age_phrase ...), $(date)
+# and $(basename ...) inside a log line or a digest can only garble the line
+# they are printed in. Startup is not swept either: $(discover_supervisor_target)
+# is validated against tmux immediately and a bad target exits loudly.
+_as_int_into() {  # <outvar> <raw> <fallback> [context]
+  local __ai_out=$1 __ai_raw=$2 __ai_fb=$3 __ai_ctx=${4:-value} __ai_v __ai_digits
+  __ai_v=${__ai_raw%%$'\n'*}                      # first line only
+  __ai_v="${__ai_v#"${__ai_v%%[![:space:]]*}"}"   # strip leading whitespace
+  __ai_v="${__ai_v%"${__ai_v##*[![:space:]]}"}"   # strip trailing whitespace
+  __ai_digits=${__ai_v#-}
+  case "$__ai_digits" in
+    ''|*[!0-9]*)
+      _int_warn "$__ai_ctx" "$__ai_raw"
+      printf -v "$__ai_out" '%s' "$__ai_fb"
+      return ;;
+  esac
+  printf -v "$__ai_out" '%s' "$__ai_v"
+}
+
+# The stdout form. It has NO production caller: every daemon path reads the
+# _into form, because a value returned on stdout has to cross a $( ) to be used
+# and that capture is the boundary this hardening exists to close. It is kept
+# because the unit tests pin the coercion contract through it, and because it is
+# the shape a reverted call site would take, so the regression cases below have
+# something to stub.
+_as_int() {  # <raw> <fallback> [context] -> a bare integer (or <fallback>) on stdout
+  local __asi_v
+  _as_int_into __asi_v "$1" "$2" "${3:-value}"
+  printf '%s' "$__asi_v"
+}
+
+# Never silent. An unreadable numeric value means a liveness decision just ran
+# on a fallback, which is precisely the failure that hid for three weeks. Every
+# occurrence goes to the daemon log (size-capped by trim_log); stderr gets one
+# line per context per FM_INT_WARN_INTERVAL_MIN minutes, because the full disk
+# that causes this pollution is not helped by megabytes of warnings. The
+# throttle is an mtime probe via `find -mmin`, deliberately NOT arithmetic, so
+# the warning path cannot itself trip the fault it is reporting.
+_int_warn() {  # <context> <raw>
+  local ctx=$1 raw=$2 marker state mins
+  raw=$(printf '%s' "$raw" | tr '\n\t' '  ' | cut -c1-120)
+  log "ERROR: unreadable numeric value for ${ctx} (raw='${raw}'); decision fell back"
+  state=${FM_DAEMON_WARN_STATE:-}
+  if [ -n "$state" ] && [ -d "$state" ]; then
+    marker="$state/.subsuper-intwarn-$(printf '%s' "$ctx" | tr -c '[:alnum:]' '-')"
+    # Validated inline rather than through _as_int, because this IS the
+    # fallback path and a coercion call here would recurse. A malformed value
+    # would otherwise make `find` error out, silently disengaging the throttle
+    # and putting the unbounded stderr flood back.
+    mins=${FM_INT_WARN_INTERVAL_MIN:-$INT_WARN_INTERVAL_MIN_DEFAULT}
+    case "$mins" in ''|*[!0-9]*) mins=$INT_WARN_INTERVAL_MIN_DEFAULT ;; esac
+    if [ -e "$marker" ] && [ -n "$(find "$marker" -mmin "-$mins" 2>/dev/null)" ]; then
+      return 0
+    fi
+    : > "$marker" 2>/dev/null || true
+  fi
+  printf 'fm-supervise-daemon: ERROR: unreadable numeric value for %s (raw=%s); decision fell back\n' \
+    "$ctx" "$raw" >&2
+}
+
+# Read an integer-valued environment override BY NAME through the same
+# coercion. An override is just another untrusted numeric input: a stray-quoted
+# entry in a sourced env file feeding a bare `[` aborts the comparison and
+# silently disables the very liveness decision it configures, which is the class
+# of failure this hardening exists to end. Every integer-valued env read below
+# goes through here, and the one fractional-seconds override goes through
+# _env_secs, so the hardening is uniform rather than spot-applied.
+_env_int_into() {  # <outvar> <var-name> <default>
+  local __ei_out=$1 __ei_name=$2 __ei_def=$3 __ei_raw
+  __ei_raw=${!__ei_name-}
+  [ -n "$__ei_raw" ] || { printf -v "$__ei_out" '%s' "$__ei_def"; return; }
+  _as_int_into "$__ei_out" "$__ei_raw" "$__ei_def" "$__ei_name"
+}
+
+# No production caller, kept for the unit tests, as _as_int explains.
+_env_int() {  # <var-name> <default> -> a bare integer on stdout
+  local __evi_v
+  _env_int_into __evi_v "$1" "$2"
+  printf '%s' "$__evi_v"
+}
+
+# A cadence that feeds `sleep` needs more than integer-ness. `sleep 0` returns
+# instantly and `sleep -1` fails outright, and either one turns the loop that
+# cadence paces into a spin, calling the whole liveness layer continuously - the
+# busy loop the coercion is here to prevent, arrived by a different door. A
+# non-positive value is therefore a malformed CADENCE and falls back to its
+# documented default, loudly, exactly as an unreadable one does. The floor lives
+# here rather than in _as_int because it belongs only to a value that reaches a
+# `sleep`. An override that feeds a comparison and nothing else keeps the plain
+# _env_int_into read, because zero is a meaningful setting there: it disables a
+# feature (FM_ESCALATE_BATCH_SECS, FM_MAX_DEFER_SECS) or lowers a threshold to
+# every tick (FM_SECONDMATE_PROBE_TICK).
+_env_pos_int_into() {  # <outvar> <var-name> <positive-default>
+  local __ep_out=$1 __ep_name=$2 __ep_def=$3 __ep_v
+  _env_int_into __ep_v "$__ep_name" "$__ep_def"
+  if [ "$__ep_v" -le 0 ]; then
+    _int_warn "$__ep_name (a cadence must be positive)" "$__ep_v"
+    __ep_v=$__ep_def
+    [ "$__ep_v" -le 0 ] && __ep_v=1
+  fi
+  printf -v "$__ep_out" '%s' "$__ep_v"
+}
+
+# The one numeric override that is NOT an integer: a sub-second poll delay fed
+# straight to `sleep`. It cannot go through _as_int (which would reject its own
+# 0.5 default), but it must not stay raw either: `sleep` exits immediately on a
+# malformed argument, turning a paced retry into a spin.
+_env_secs_into() {  # <outvar> <var-name> <default>
+  local __es_out=$1 __es_name=$2 __es_def=$3 __es_raw __es_v
+  __es_raw=${!__es_name-}
+  [ -n "$__es_raw" ] || { printf -v "$__es_out" '%s' "$__es_def"; return; }
+  __es_v=${__es_raw%%$'\n'*}          # first line only, as _as_int_into does
+  __es_v="${__es_v#"${__es_v%%[![:space:]]*}"}"
+  __es_v="${__es_v%"${__es_v##*[![:space:]]}"}"
+  case "$__es_v" in
+    ''|.|*[!0-9.]*|*.*.*)
+      _int_warn "$__es_name" "$__es_raw"
+      printf -v "$__es_out" '%s' "$__es_def"
+      return ;;
+  esac
+  printf -v "$__es_out" '%s' "$__es_v"
+}
+
+# No production caller, kept for the unit tests, as _as_int explains.
+_env_secs() {  # <var-name> <default> -> a bare decimal on stdout
+  local __evs_v
+  _env_secs_into __evs_v "$1" "$2"
+  printf '%s' "$__evs_v"
+}
+
+# Current epoch seconds as a bare integer, or NOTHING plus a non-zero status
+# when the clock read is unusable. There is deliberately no fallback epoch: 0 is
+# not a conservative default but a 1970 timestamp, and it propagates - every age
+# derived from it is absurdly large or negative, and one written into a marker
+# that is read back BY CONTENT is believed for as long as that marker lives.
+# Callers choose the policy explicitly instead: _age_since turns an unusable
+# clock into the "very old" sentinel (fail toward action) and _stamp_now refuses
+# to fabricate a stamp.
+_now_into() {  # <outvar> -> status 0 with the epoch assigned, or status 1 with nothing assigned
+  local __nw_out=$1 __nw_v
+  _as_int_into __nw_v "$(date +%s)" '' 'clock'
+  [ -n "$__nw_v" ] || return 1
+  printf -v "$__nw_out" '%s' "$__nw_v"
+}
+
+# No production caller, kept for the unit tests, as _as_int explains.
+_now() {
+  local __nws_v
+  _now_into __nws_v || return 1
+  printf '%s\n' "$__nws_v"
+}
+
+# The "very old" sentinel an unmeasurable age reads as. Named because it is a
+# policy, not a magic number: an age the daemon cannot measure must fail toward
+# ACTION, and "very old" is what makes it do so. That is the right reading for a
+# liveness age (is the beacon stale? is a queued wake stranded?) and, as
+# throttle_ready explains, for a throttle age too: the condition that makes an
+# age unmeasurable is the incident, and a check that goes quiet during its own
+# incident is not a check.
+AGE_UNKNOWN=999999
+
+# Seconds elapsed since <epoch-raw>. The ONE place the coerce-both-operands /
+# subtract / clamp-negative sequence lives, so the arithmetic cannot drift
+# between the beacon age, the escalation-buffer age, the stale-marker age, the
+# wake-queue age and the throttle ages. It reports an unmeasurable age as a
+# NON-ZERO status so the sentinel is applied in exactly one place
+# (_age_since_into) instead of being re-derived, differently, per caller.
+_elapsed_since_into() {  # <outvar> <epoch-raw> <context> -> status 0 with the age assigned, or status 1
+  local __el_out=$1 __el_raw=$2 __el_ctx=$3 __el_epoch __el_now __el_age
+  _as_int_into __el_epoch "$__el_raw" '' "$__el_ctx"
+  [ -n "$__el_epoch" ] || return 1
+  _now_into __el_now || return 1
+  __el_age=$(( __el_now - __el_epoch ))
+  [ "$__el_age" -lt 0 ] && __el_age=0   # a future epoch is fresh, never a negative age
+  printf -v "$__el_out" '%s' "$__el_age"
+}
+
+# The LIVENESS reading of an elapsed time: an unusable stored epoch or clock
+# reads as the AGE_UNKNOWN "very old" sentinel, so a check built on an age errs
+# toward acting rather than toward doing nothing.
+_age_since_into() {  # <outvar> <epoch-raw> [context]
+  local __as_out=$1
+  _elapsed_since_into "$__as_out" "$2" "${3:-epoch}" \
+    || printf -v "$__as_out" '%s' "$AGE_UNKNOWN"
+}
+
+# No production caller, kept for the unit tests, as _as_int explains.
+_age_since() {  # <epoch-raw> [context] -> age in seconds, or AGE_UNKNOWN
+  local __ags_v
+  _age_since_into __ags_v "$1" "${2:-epoch}"
+  echo "$__ags_v"
+}
+
+# Render an age for a human-readable line. The sentinel is not a duration, and
+# printing it as one puts a fabricated-looking number in front of the captain
+# that reads exactly like a measured one; a real measurement still prints as a
+# duration.
+_age_phrase() {  # <age> -> "<n>s" or an explicit unknown
+  case "$1" in
+    "$AGE_UNKNOWN") printf 'for an unknown duration' ;;
+    *) printf '%ss' "$1" ;;
+  esac
+}
+
+# Stamp the current epoch into a marker file. Some markers are read back by
+# CONTENT (the stale marker, the escalation-since sidecar) and some only by
+# MTIME (the throttle markers), so an unusable clock truncates the file instead
+# of writing a fabricated epoch: the mtime still advances, keeping every throttle
+# honest, while a content reader sees an empty value that _age_since turns into
+# the "very old" sentinel rather than a believable 1970 timestamp. The epoch is
+# read into a variable rather than captured for the same reason the decisions
+# are: a flush on that capture would persist a polluted value into a marker that
+# outlives the tick that wrote it.
+_stamp_now() {  # <file>
+  local f=$1 v
+  if _now_into v; then printf '%s\n' "$v" > "$f"; return 0; fi
+  : > "$f" 2>/dev/null || true
+  return 1
+}
+
+_file_age_into() {  # <outvar> <path> -> seconds since mtime, or the AGE_UNKNOWN sentinel
+  local __fa_out=$1 __fa_path=$2 __fa_m
+  __fa_m=$(_stat_file_mtime "$__fa_path") \
+    || { printf -v "$__fa_out" '%s' "$AGE_UNKNOWN"; return; }
+  _age_since_into "$__fa_out" "$__fa_m" "mtime:$__fa_path"
+}
+
+# No production caller, kept for the unit tests, as _as_int explains.
+_file_age() {  # seconds since mtime; the AGE_UNKNOWN sentinel when unknown/missing
+  local __fas_v
+  _file_age_into __fas_v "$1"
+  echo "$__fas_v"
+}
+
+# The ONE rate limiter for every periodic action in the daemon: 0 when the action
+# is due to run again, measured as the age of <marker>, which its caller stamps
+# each time it acts.
+#
+# A marker that is not there means the action has never run, and it fires at
+# once: a throttle must never delay an action's first run. That is also what a
+# marker _stamp_now could not create looks like on a full disk, so the action
+# keeps happening rather than waiting on a file the disk will not accept.
+#
+# The age is read through _file_age, so an unreadable clock reads as very old and
+# the action fires on every tick until the clock comes back. That direction is
+# deliberate, and it is the whole policy: the condition that makes the clock
+# unreadable is a full filesystem, which is precisely the incident the gated
+# actions exist to survive, so a fallback that limited the rate there would go
+# quiet during its own incident. A check the feared condition makes quieter is
+# not a check. The cost settles it too: fm-watch-arm.sh no-ops against a healthy
+# watcher, so a redundant firing costs a process check while a missed one is an
+# unsupervised fleet.
+#
+# Nothing here keeps state of its own, on disk or in memory. The marker its
+# caller already stamps is the entire record, so there is no counter for a full
+# disk to pin shut and none to strand across episodes when a marker is removed.
+#
+# Both operands are read into variables first: the age through _file_age_into,
+# and <min-gap-secs> through the caller's own _env_int_into, so neither crosses
+# a command substitution on its way into the comparison.
+throttle_ready() {  # <marker> <min-gap-secs>
+  local __tr_age
+  [ -e "$1" ] || return 0
+  _file_age_into __tr_age "$1"
+  [ "$__tr_age" -ge "$2" ]
 }
 
 _hash_text() {
@@ -412,16 +780,39 @@ classify_unknown() {  # <reason>
 
 _stale_key() { printf '%s' "$1" | tr ':/.' '___'; }
 
+# The window-to-marker-key transformation with NO command substitution anywhere:
+# strip the session prefix, strip the fm- prefix, replace the three path-unsafe
+# characters. Pure parameter expansion, so it is the (a) "removed" case of the
+# capture sweep rather than a coerced or fail-toward-action one.
+#
+# It deliberately does not call window_to_task and _stale_key, because both
+# return on stdout and reading them back is the substitution boundary this
+# incident is about: the marker key gates whether a stale recheck finds its
+# window at all, and a polluted key reads as "window gone", which drops the
+# marker and escalates nothing. That is the silent direction. It mirrors those
+# two functions rather than replacing them (window_to_task is shared with
+# bin/fm-watch.sh through fm-classify-lib.sh), and
+# test_window_stale_key_matches_the_composed_captures pins the mirror against
+# drift.
+_window_stale_key_into() {  # <outvar> <window>
+  local __wk_t=${2##*:}
+  __wk_t=${__wk_t#fm-}
+  __wk_t=${__wk_t//:/_}
+  __wk_t=${__wk_t//\//_}
+  __wk_t=${__wk_t//./_}
+  printf -v "$1" '%s' "$__wk_t"
+}
+
 stale_marker_record() {  # <window> <state>  — create if absent
   local win=$1 state=$2 key marker
-  key=$(_stale_key "$(window_to_task "$win")")
+  _window_stale_key_into key "$win"
   marker="$state/.subsuper-stale-$key"
-  [ -e "$marker" ] || _now > "$marker"
+  [ -e "$marker" ] || _stamp_now "$marker"
 }
 
 stale_marker_remove() {  # <window> <state>
   local win=$1 state=$2 key
-  key=$(_stale_key "$(window_to_task "$win")")
+  _window_stale_key_into key "$win"
   rm -f "$state/.subsuper-stale-$key"
 }
 
@@ -473,7 +864,7 @@ pane_input_pending() { fm_pane_input_pending "$@"; }  # <target>
 escalate_add() {  # <state> <distilled-item>
   local state=$1 item=$2 buf
   buf="$state/.subsuper-escalations"
-  [ -s "$buf" ] || _now > "${buf}.since"
+  [ -s "$buf" ] || _stamp_now "${buf}.since"
   printf '%s\n' "$item" >> "$buf"
 }
 
@@ -481,55 +872,63 @@ escalate_add() {  # <state> <distilled-item>
 # supervisor pane. Returns 0 on successful inject (or empty buffer), non-zero on
 # inject failure (buffer preserved for retry / catch-up).
 escalate_flush() {  # <state>
-  local state=$1 buf item n msg
+  local state=$1 buf item n raw msg
   buf="$state/.subsuper-escalations"
   [ -s "$buf" ] || return 0
-  n=$(wc -l < "$buf" 2>/dev/null || echo 0)
+  raw=$(wc -l < "$buf" 2>/dev/null || echo 0)
+  _as_int_into n "$raw" 0 'escalation-count'
   # Join buffered items with the literal " | " separator into one digest line.
   msg=$(awk 'NR>1{printf " | "} {printf "%s",$0} END{print ""}' "$buf" 2>/dev/null)
   # Single-line wrapper: no embedded newlines (inject_msg also collapses as a
   # safety net, but keeping the source single-line makes the intent explicit).
   msg=$(printf 'Supervisor escalate (%s event(s)): %s (pre-read; re-arm not needed — watcher daemon-managed)' "$n" "$msg")
-  if inject_msg "$msg" "$state"; then : > "$buf"; rm -f "${buf}.since" "$state/.subsuper-inject-wedged"; return 0; fi
+  # A delivered digest ends the wedge episode, and the wedge marker is that
+  # episode's whole record, so dropping it is what lets the next wedge alarm at
+  # once instead of waiting out a window it had nothing to do with.
+  if inject_msg "$msg" "$state"; then
+    : > "$buf"
+    rm -f "${buf}.since" "$state/.subsuper-inject-wedged"
+    return 0
+  fi
   return 1
 }
 
-# Raise a loud, rate-limited alarm when escalations cannot be delivered after
-# max-defer (the supervisor pane is genuinely busy/wedged, or the submit's Enter
-# is swallowed). The daemon must NEVER silently wedge: this logs
+# Raise a loud alarm when escalations cannot be delivered after max-defer (the
+# supervisor pane is genuinely busy/wedged, or the submit's Enter is swallowed).
+# The daemon must NEVER silently wedge: this logs
 # an ERROR, drops a durable marker firstmate/recovery can surface, and flashes
 # the supervisor client's status line. Nothing is lost — the buffer and the
 # wake-queue both survive — but the stall stops being invisible.
+#
+# The rate limit lives in ONE place: housekeeping's max-defer escape gate, which
+# is the only caller and which has already proved the same .subsuper-inject-wedged
+# marker is a max-defer window old. A second gate here added nothing on the wall
+# clock path and could only ever make the alarm quieter, and an alarm that mutes
+# itself during the incident it announces is not an alarm.
 inject_wedge_alarm() {  # <state> <age-seconds>
   local state=$1 age=$2 marker target
   marker="$state/.subsuper-inject-wedged"
-  # Re-alarm at most once per max-defer window so a long wedge does not spam.
-  if [ "$(_file_age "$marker")" -lt "${FM_MAX_DEFER_SECS:-$MAX_DEFER_SECS_DEFAULT}" ]; then
-    return 0
-  fi
-  log "ERROR: away-mode escalation undelivered ${age}s; inject could not confirm a submit (supervisor pane busy or wedged). Buffer + wake-queue preserved; alarm marker written."
+  log "ERROR: away-mode escalation undelivered $(_age_phrase "$age"); inject could not confirm a submit (supervisor pane busy or wedged). Buffer + wake-queue preserved; alarm marker written."
   {
-    printf 'fm away-mode inject WEDGED: %ss undelivered as of %s\n' "$age" "$(date '+%Y-%m-%dT%H:%M:%S%z')"
+    printf 'fm away-mode inject WEDGED: undelivered %s as of %s\n' "$(_age_phrase "$age")" "$(date '+%Y-%m-%dT%H:%M:%S%z')"
     printf 'The supervisor pane could not accept an escalation. Buffered items:\n'
     cat "$state/.subsuper-escalations" 2>/dev/null
   } > "$marker" 2>/dev/null || true
   target="${FM_SUPERVISOR_TARGET:-$FM_SUPERVISOR_TARGET_DEFAULT}"
-  tmux display-message -t "$target" "fm: away-mode escalations WEDGED ${age}s — see $marker" 2>/dev/null || true
+  tmux display-message -t "$target" "fm: away-mode escalations WEDGED $(_age_phrase "$age") - see $marker" 2>/dev/null || true
 }
 
-_oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first arrived (sidecar epoch)
-  local f=$1 since
-  [ -s "$f" ] || { echo 999999; return; }
-  since="${f}.since"
-  if [ -r "$since" ]; then
-    echo $(( $(_now) - $(cat "$since" 2>/dev/null || echo 0) ))
-  else
-    echo 999999
-  fi
+_oldest_line_age_into() {  # <outvar> <buf> -> seconds since the oldest buffered item first arrived (sidecar epoch)
+  local __ol_out=$1 __ol_f=$2 __ol_since __ol_raw
+  [ -s "$__ol_f" ] || { printf -v "$__ol_out" '%s' "$AGE_UNKNOWN"; return; }
+  __ol_since="${__ol_f}.since"
+  [ -r "$__ol_since" ] || { printf -v "$__ol_out" '%s' "$AGE_UNKNOWN"; return; }
+  __ol_raw=$(cat "$__ol_since" 2>/dev/null || true)
+  _age_since_into "$__ol_out" "$__ol_raw" 'escalation-since'
 }
 
 # --- housekeeping (runs every tick while the watcher is mid-cycle) ----------
-# Four cheap jobs, each guarded so an empty/quiet fleet costs near zero:
+# Five cheap jobs, each guarded so an empty/quiet fleet costs near zero:
 #  1) batch flush: if the escalation buffer's oldest content is older than
 #     ESCALATE_BATCH_SECS (or batching is disabled), inject one digest.
 #  1b) max-defer escape: if the buffer is STILL undelivered past MAX_DEFER_SECS,
@@ -539,16 +938,22 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #     re-peek the pane; still idle -> escalate (wedge); resumed -> clear marker.
 #  3) heartbeat scan: every HEARTBEAT_SCAN_SECS, grep state/*.status for a
 #     captain-relevant line the per-wake classifier missed and escalate it.
+#  4) log cap: trim the daemon log. It belongs on the TICK, not on a wake: away
+#     mode's only other trim runs after a watcher wake, which a quiet fleet can
+#     be hours from, while _int_warn logs every occurrence and the loop reads
+#     several ages per second - so a persistently polluted read would pile up
+#     megabytes of log during the very full-disk condition that causes the
+#     pollution. Present mode calls trim_log directly (it runs no housekeeping).
 housekeeping() {  # <state>
-  local state=$1 now due f key task win marker age last max_defer oldest
-  now=$(_now)
+  local state=$1 due f key task win marker age last max_defer oldest batch stale_after scan_gap marker_raw
+  _env_int_into batch FM_ESCALATE_BATCH_SECS "$ESCALATE_BATCH_SECS_DEFAULT"
 
   # (1) batch flush
-  if [ "${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}" -le 0 ]; then
+  if [ "$batch" -le 0 ]; then
     escalate_flush "$state" || true
   else
-    due=$(_oldest_line_age "$state/.subsuper-escalations")
-    if [ "$due" -ge "${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}" ]; then
+    _oldest_line_age_into due "$state/.subsuper-escalations"
+    if [ "$due" -ge "$batch" ]; then
       escalate_flush "$state" || true
     fi
   fi
@@ -556,16 +961,16 @@ housekeeping() {  # <state>
   # (1b) max-defer escape. If anything is still buffered past MAX_DEFER_SECS,
   # retry the normal delivery path. If that still cannot confirm, raise a loud
   # wedge alarm while preserving the buffer.
-  max_defer=${FM_MAX_DEFER_SECS:-$MAX_DEFER_SECS_DEFAULT}
+  _env_int_into max_defer FM_MAX_DEFER_SECS "$MAX_DEFER_SECS_DEFAULT"
   if afk_active "$state" && [ "$max_defer" -gt 0 ] && [ -s "$state/.subsuper-escalations" ]; then
-    oldest=$(_oldest_line_age "$state/.subsuper-escalations")
-    # Throttle the alarm to once per max-defer window (the wedge marker doubles
-    # as the throttle). A successful flush clears the buffer; a failed one alarms
-    # and waits.
+    _oldest_line_age_into oldest "$state/.subsuper-escalations"
+    # The ONLY throttle on this retry and on the wedge alarm it can raise: once
+    # per max-defer window, with the wedge marker doubling as the throttle.
+    # A successful flush clears the buffer; a failed one alarms and waits.
     if [ "$oldest" -ge "$max_defer" ] \
-       && [ "$(_file_age "$state/.subsuper-inject-wedged")" -ge "$max_defer" ]; then
+       && throttle_ready "$state/.subsuper-inject-wedged" "$max_defer"; then
       if escalate_flush "$state"; then
-        log "inject recovered: max-defer flush succeeded after ${oldest}s undelivered"
+        log "inject recovered: max-defer flush succeeded; undelivered $(_age_phrase "$oldest")"
         rm -f "$state/.subsuper-inject-wedged"
       else
         inject_wedge_alarm "$state" "$oldest"
@@ -574,14 +979,27 @@ housekeeping() {  # <state>
   fi
 
   # (2) stale persistence recheck
+  _env_int_into stale_after FM_STALE_ESCALATE_SECS "$STALE_ESCALATE_SECS_DEFAULT"
   for marker in "$state"/.subsuper-stale-*; do
     [ -e "$marker" ] || continue
     key="${marker##*.subsuper-stale-}"
-    age=$(( now - $(cat "$marker" 2>/dev/null || echo "$now") ))
-    [ "$age" -ge "${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}" ] || continue
+    # An unreadable marker reads as very old, so the recheck below still runs.
+    # Say the cost out loud rather than claim there is none: under an unusable
+    # clock _stamp_now truncates this marker, the sentinel clears stale_after on
+    # the very next tick, and a crewmate that stopped its turn seconds ago and
+    # shows no busy signature escalates as a possible wedge roughly
+    # FM_STALE_ESCALATE_SECS early - one the persistence window would have
+    # absorbed. That is deliberate, not accidental. The condition that makes the
+    # clock unreadable is the full disk, which is exactly when a wedge is most
+    # likely and least likely to announce itself, and an early escalation names
+    # its own uncertainty ("possible wedge", "for an unknown duration") while a
+    # suppressed one leaves the captain reading nothing at all.
+    marker_raw=$(cat "$marker" 2>/dev/null || true)
+    _age_since_into age "$marker_raw" "stale-marker:$key"
+    [ "$age" -ge "$stale_after" ] || continue
     # Reconstruct the window name from the key (best-effort: session is unknown,
     # so probe the live fm-* windows for one whose task matches).
-    win=$(window_for_task "$key" 2>/dev/null || true)
+    window_for_task_into win "$key" 2>/dev/null || true
     if [ -z "$win" ]; then
       # Window gone (task torn down): drop the marker, nothing to escalate.
       rm -f "$marker"; continue
@@ -589,7 +1007,7 @@ housekeeping() {  # <state>
     if pane_is_busy "$win"; then
       rm -f "$marker"   # crewmate resumed: benign
     else
-      escalate_add "$state" "stale persisted ${age}s (possible wedge): $win"
+      escalate_add "$state" "stale persisted $(_age_phrase "$age") (possible wedge): $win"
       stale_marker_remove "$win" "$state"
     fi
   done
@@ -598,25 +1016,44 @@ housekeeping() {  # <state>
   #     classifier may have missed). Cheap: status files only, no tmux. The
   #     captain-relevant filtering is the shared classifier's
   #     scan_captain_relevant_statuses; the daemon layers its digest dedup on top.
-  if [ "$(_file_age "$state/.subsuper-last-scan")" -ge "${FM_HEARTBEAT_SCAN_SECS:-$HEARTBEAT_SCAN_SECS_DEFAULT}" ]; then
-    _now > "$state/.subsuper-last-scan"
-    local seen
-    while IFS="$(printf '\t')" read -r f task last; do
+  _env_int_into scan_gap FM_HEARTBEAT_SCAN_SECS "$HEARTBEAT_SCAN_SECS_DEFAULT"
+  if throttle_ready "$state/.subsuper-last-scan" "$scan_gap"; then
+    _stamp_now "$state/.subsuper-last-scan"
+    local seen seen_last
+    while IFS=$'\t' read -r f task last; do
       [ -n "$f" ] || continue
       seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
-      [ "$(cat "$seen" 2>/dev/null || true)" = "$last" ] && continue
+      seen_last=$(cat "$seen" 2>/dev/null || true)
+      [ "$seen_last" = "$last" ] && continue
       escalate_add "$state" "$(basename "$f"): $last (catch-all scan)"
       mark_status_seen "$state" "$task" "$last"
     done < <(scan_captain_relevant_statuses "$state")
   fi
+
+  # (4) log cap, on the tick rather than only on a wake (see the note above).
+  trim_log
 }
 
-# Find a live fm-* window whose task id matches the given marker key.
-window_for_task() {  # <task-key>
-  local key=$1 w t
-  for w in $(tmux list-windows -a -F '#{session_name}:#{window_name}' 2>/dev/null | grep ':fm-' || true); do
-    t=$(window_to_task "$w")
-    [ "$(_stale_key "$t")" = "$key" ] && { printf '%s' "$w"; return 0; }
+# Find a live fm-* window whose task id matches the given marker key. Assigns
+# into a caller-scope variable: housekeeping branches on emptiness to tell "task
+# torn down" from "task still there", and a polluted capture would read as a live
+# window whose pane probe then fails, turning a benign teardown into a wedge
+# escalation.
+#
+# The compared key is built by _window_stale_key_into, so neither side of the
+# match crosses a substitution. Pre-fix it was two nested captures of
+# daemon-defined helpers, and a flush on either one made the window fail to
+# match, which housekeeping reads as "task torn down": it drops the stale marker
+# and escalates nothing. That direction is silence, so the capture had to go.
+# The window LIST stays a capture because tmux is an external command and cannot
+# be anything else; a flush there costs one recheck cycle, since the next stale
+# wake re-records the marker.
+window_for_task_into() {  # <outvar> <task-key>
+  local __wf_out=$1 __wf_key=$2 __wf_w __wf_k
+  printf -v "$__wf_out" '%s' ''
+  for __wf_w in $(tmux list-windows -a -F '#{session_name}:#{window_name}' 2>/dev/null | grep ':fm-' || true); do
+    _window_stale_key_into __wf_k "$__wf_w"
+    [ "$__wf_k" = "$__wf_key" ] && { printf -v "$__wf_out" '%s' "$__wf_w"; return 0; }
   done
   return 1
 }
@@ -674,8 +1111,8 @@ _inject_marked() {  # <message> <target>
   # via the shared submit primitive. Success = the composer is confirmed EMPTY
   # afterward (the text was consumed). An unconfirmed/unknown pane does NOT count
   # as delivered.
-  retries=${FM_INJECT_CONFIRM_RETRIES:-$INJECT_CONFIRM_RETRIES_DEFAULT}
-  sleep_s=${FM_INJECT_CONFIRM_SLEEP:-$INJECT_CONFIRM_SLEEP_DEFAULT}
+  _env_int_into retries FM_INJECT_CONFIRM_RETRIES "$INJECT_CONFIRM_RETRIES_DEFAULT"
+  _env_secs_into sleep_s FM_INJECT_CONFIRM_SLEEP "$INJECT_CONFIRM_SLEEP_DEFAULT"
   verdict=$(fm_tmux_submit_core "$target" "$msg" "$retries" "$sleep_s" "$sleep_s")
   if [ "$verdict" = empty ]; then
     return 0  # Composer cleared → submit confirmed.
@@ -686,7 +1123,8 @@ _inject_marked() {  # <message> <target>
 
 inject_msg() {  # <message> [state]
   local msg=$1 state target
-  state="${2:-$(_state_root)}"
+  state=${2:-}
+  [ -n "$state" ] || _state_root_into state
   # Presence-gate: escalations inject ONLY when afk is active. When afk is off,
   # the daemon self-handles and stays quiet; firstmate drives the normal always-on
   # watcher triage. Escalations buffer and survive for the next catch-up flush.
@@ -707,28 +1145,46 @@ inject_msg() {  # <message> [state]
 # ============================================================================
 
 # Count in-flight tasks (a state/<id>.meta exists). Mirrors fm-guard.sh.
-_in_flight_count() {  # <state>
-  local state=$1 meta n=0
-  for meta in "$state"/*.meta; do
-    [ -e "$meta" ] || continue
-    n=$((n + 1))
+_in_flight_count_into() {  # <outvar> <state>
+  local __ifc_out=$1 __ifc_state=$2 __ifc_meta __ifc_n=0
+  for __ifc_meta in "$__ifc_state"/*.meta; do
+    [ -e "$__ifc_meta" ] || continue
+    __ifc_n=$((__ifc_n + 1))
   done
-  printf '%s' "$n"
+  printf -v "$__ifc_out" '%s' "$__ifc_n"
+}
+
+# No production caller, kept for the unit tests, as _as_int explains. The
+# capture of THIS wrapper is where the 2026-07-15 abort was recorded landing.
+_in_flight_count() {  # <state>
+  local __ifcs_v
+  _in_flight_count_into __ifcs_v "$1"
+  printf '%s' "$__ifcs_v"
 }
 
 # --- (behavior 2) watcher-liveness backstop ---------------------------------
 # _backstop_should_arm: 0 if the daemon should (re-)arm the watcher now - some
 # task is in flight AND the watcher liveness beacon is missing or older than
 # FM_GUARD_GRACE. Pure read (no side effects), so it is directly testable.
+#
+# This is the function the 2026-07-15 abort was reported from, and its in-flight
+# comparison is the one the field log caught mid-pollution, so not one of its
+# three operands crosses a command substitution: each is read into a variable by
+# an _into helper first.
 _backstop_should_arm() {  # <state>
-  local state=$1 age
-  [ "$(_in_flight_count "$state")" -gt 0 ] || return 1
-  age=$(_file_age "$state/.last-watcher-beat")
-  [ "$age" -ge "${FM_GUARD_GRACE:-$GUARD_GRACE_DEFAULT}" ]
+  local state=$1 age grace in_flight
+  _in_flight_count_into in_flight "$state"
+  [ "$in_flight" -gt 0 ] || return 1
+  _file_age_into age "$state/.last-watcher-beat"
+  _env_int_into grace FM_GUARD_GRACE "$GUARD_GRACE_DEFAULT"
+  [ "$age" -ge "$grace" ]
 }
 
-# ensure_watcher_backstop: when _backstop_should_arm says so (throttled to one
-# launch per BACKSTOP_ARM_THROTTLE so a stale window does not spawn a burst),
+# ensure_watcher_backstop: when _backstop_should_arm says so (throttled through
+# throttle_ready to one launch per BACKSTOP_ARM_THROTTLE while the clock reads,
+# so a stale window does not spawn a burst; when it does not read, the arm fires
+# on every tick, because a redundant arm is a no-op against a healthy watcher and
+# a missed one is the outage this backstop exists to end),
 # launch fm-watch-arm.sh DETACHED. The arm blocks on its watcher child, so it is
 # double-forked ( ... & ) inside a subshell that exits immediately: the arm is
 # reparented away from the daemon (no zombie, never waited on) and re-establishes
@@ -741,13 +1197,14 @@ _backstop_should_arm() {  # <state>
 # stranded-wake poke, not this, re-invokes the LLM; this only keeps the enqueue
 # machinery and beacon alive.
 ensure_watcher_backstop() {  # <state>
-  local state=$1 age throttle
+  local state=$1 age min_gap in_flight
   _backstop_should_arm "$state" || return 0
-  throttle=$(_file_age "$state/.subsuper-last-backstop-arm")
-  [ "$throttle" -ge "${FM_BACKSTOP_ARM_THROTTLE:-$BACKSTOP_ARM_THROTTLE_DEFAULT}" ] || return 0
-  _now > "$state/.subsuper-last-backstop-arm"
-  age=$(_file_age "$state/.last-watcher-beat")
-  log "watcher beacon stale ${age}s with $(_in_flight_count "$state") in flight; launching backstop re-arm"
+  _env_int_into min_gap FM_BACKSTOP_ARM_THROTTLE "$BACKSTOP_ARM_THROTTLE_DEFAULT"
+  throttle_ready "$state/.subsuper-last-backstop-arm" "$min_gap" || return 0
+  _stamp_now "$state/.subsuper-last-backstop-arm"
+  _file_age_into age "$state/.last-watcher-beat"
+  _in_flight_count_into in_flight "$state"
+  log "watcher beacon stale $(_age_phrase "$age") with $in_flight in flight; launching backstop re-arm"
   (
     # shellcheck disable=SC1090,SC1091
     [ -f "$FM_HOME/config/x-mode.env" ] && . "$FM_HOME/config/x-mode.env"
@@ -758,30 +1215,66 @@ ensure_watcher_backstop() {  # <state>
 }
 
 # --- (behavior 3) stranded-wake session poke --------------------------------
-# The durable wake queue path for a given state dir.
-_wake_queue_path() { printf '%s' "$1/.wake-queue"; }
+# The durable wake queue path for a given state dir. Assigns into a caller-scope
+# variable for the same reason every numeric helper does: a path is a value the
+# poke path then BRANCHES on ([ -s ... ]), and a builtin write captured through
+# $( ) is exactly where the stuck buffer was recorded landing. A polluted path
+# would read as an empty queue, and this is the one mechanism that re-invokes the
+# LLM session, so it must never fail toward silence.
+_wake_queue_path_into() {  # <outvar> <state>
+  printf -v "$1" '%s' "$2/.wake-queue"
+}
 
 # Age (seconds) of the OLDEST queued wake, or -1 when the queue is empty/missing.
 # The queue is append-ordered "epoch<TAB>seq<TAB>...", so the first line's epoch
 # is the oldest pending wake.
-_poke_oldest_age() {  # <state>
-  local state=$1 queue first epoch
-  queue=$(_wake_queue_path "$state")
-  [ -s "$queue" ] || { printf '%s' -1; return; }
-  first=$(head -1 "$queue" 2>/dev/null)
-  epoch=${first%%$'\t'*}
-  case "$epoch" in ''|*[!0-9]*) printf '%s' -1; return ;; esac
-  printf '%s' "$(( $(_now) - epoch ))"
+#
+# TWO SITUATIONS, TWO VALUES, deliberately never the same one:
+#   -1            "there is nothing queued". The queue is genuinely empty or
+#                 missing, so there is nothing to poke about and silence is the
+#                 right answer.
+#   AGE_UNKNOWN   "there IS something queued and its head cannot be read". The
+#                 head line survived a stuck-buffer flush, or the file is
+#                 malformed. That is not an all-clear, it is the daemon failing
+#                 to read work it can see, so it warns through _int_warn and
+#                 reads as very old, which fires the poke.
+# Collapsing the second onto -1 is what made this fail toward SILENCE: the head
+# is read with an external `head`, so the prepended orientation of the field
+# pollution ("<stale log line>\n<real record>") leaves no tab in the first line,
+# any epoch test rejects it, and the one mechanism that re-invokes the LLM
+# session went quiet with nothing on stderr. The cost of the split is a poke
+# telling the captain to drain a queue that may not need draining; the benefit
+# is that a stranded queue can never be silently ignored.
+#
+# So the epoch goes straight into _age_since_into, which coerces it (recovering
+# the appended orientation), warns when it cannot, and falls back to the very-old
+# sentinel. No test rejects the value to a quiet number in between.
+_poke_oldest_age_into() {  # <outvar> <state>
+  local __po_out=$1 __po_state=$2 __po_queue __po_first __po_epoch
+  _wake_queue_path_into __po_queue "$__po_state"
+  [ -s "$__po_queue" ] || { printf -v "$__po_out" '%s' -1; return; }
+  __po_first=$(head -1 "$__po_queue" 2>/dev/null)
+  __po_epoch=${__po_first%%$'\t'*}
+  _age_since_into "$__po_out" "$__po_epoch" 'wake-queue'
 }
 
 # Signature of the current queue content. Changes when a wake is added or the
 # queue drains, which is exactly the "queue drained or a new wake arrived"
-# condition that re-permits a poke.
-_poke_queue_sig() {  # <state>
-  local state=$1 queue
-  queue=$(_wake_queue_path "$state")
-  [ -s "$queue" ] || { printf ''; return; }
-  _hash_text "$(cat "$queue" 2>/dev/null)"
+# condition that re-permits a poke. Assigns into a caller-scope variable because
+# poke_should_fire compares the result, so returning it on stdout would put the
+# dedupe decision back across a capture boundary.
+#
+# The digest read stays a capture because it is an external command with no
+# _into form, and it is the one value here whose pollution is harmless: a
+# polluted digest cannot equal the stored one, so the dedupe re-permits the poke
+# rather than suppressing it. The queue PATH is the value that had to move, since
+# a polluted path reads as an empty queue and silences the poke outright.
+_poke_queue_sig_into() {  # <outvar> <state>
+  local __pq_out=$1 __pq_state=$2 __pq_queue __pq_sig
+  _wake_queue_path_into __pq_queue "$__pq_state"
+  [ -s "$__pq_queue" ] || { printf -v "$__pq_out" '%s' ''; return; }
+  __pq_sig=$(_hash_text "$(cat "$__pq_queue" 2>/dev/null)")
+  printf -v "$__pq_out" '%s' "$__pq_sig"
 }
 
 # poke_should_fire: 0 if a stranded-wake poke is warranted right now:
@@ -791,14 +1284,24 @@ _poke_queue_sig() {  # <state>
 #     the same stranded state - only a drain or a new wake re-permits a poke).
 # Pure read of state markers; the pane-busy guard is applied by _inject_marked at
 # send time (and re-checked in poke_session), so this stays a cheap decision.
+# The min-interval throttle deliberately keeps _file_age (and so the very-old
+# sentinel) rather than throttle_ready: the burst guard here is the signature
+# dedupe, which reads no clock at all, so an unreadable clock cannot produce a
+# poke storm - while the poke itself is the one mechanism that re-invokes the
+# LLM session and must never be gated behind a tick count.
 poke_should_fire() {  # <state>
-  local state=$1 age throttle sig last_sig
-  age=$(_poke_oldest_age "$state")
+  local state=$1 age throttle sig last_sig after min_interval
+  _poke_oldest_age_into age "$state"
   case "$age" in ''|*[!0-9-]*) return 1 ;; esac
-  [ "$age" -ge "${FM_POKE_AFTER_SECS:-$POKE_AFTER_SECS_DEFAULT}" ] || return 1
-  throttle=$(_file_age "$state/.subsuper-poke-sig")
-  [ "$throttle" -ge "${FM_POKE_MIN_INTERVAL:-$POKE_MIN_INTERVAL_DEFAULT}" ] || return 1
-  sig=$(_poke_queue_sig "$state")
+  _env_int_into after FM_POKE_AFTER_SECS "$POKE_AFTER_SECS_DEFAULT"
+  [ "$age" -ge "$after" ] || return 1
+  _file_age_into throttle "$state/.subsuper-poke-sig"
+  _env_int_into min_interval FM_POKE_MIN_INTERVAL "$POKE_MIN_INTERVAL_DEFAULT"
+  [ "$throttle" -ge "$min_interval" ] || return 1
+  _poke_queue_sig_into sig "$state"
+  # Sweep case (c): an external $(cat) whose pollution re-permits the poke, since
+  # a polluted signature cannot equal the stored one. The comparison is inequality
+  # for that reason, and inverting it would put the poke back behind silence.
   last_sig=$(cat "$state/.subsuper-poke-sig" 2>/dev/null || true)
   [ "$sig" != "$last_sig" ]
 }
@@ -811,14 +1314,16 @@ poke_should_fire() {  # <state>
 # min-interval throttle) only on a confirmed submit, so a deferred/busy attempt is
 # retried on the next tick rather than silently marked done.
 poke_session() {  # <state>
-  local state=$1 target n msg
+  local state=$1 target queue n msg sig
   poke_should_fire "$state" || return 0
   target="${FM_SUPERVISOR_TARGET:-$FM_SUPERVISOR_TARGET_DEFAULT}"
-  n=$(wc -l < "$(_wake_queue_path "$state")" 2>/dev/null | tr -d '[:space:]')
+  _wake_queue_path_into queue "$state"
+  n=$(wc -l < "$queue" 2>/dev/null | tr -d '[:space:]')
   case "$n" in ''|*[!0-9]*) n=1 ;; esac
   msg="Supervision liveness: ${n} wake(s) have sat unhandled in state/.wake-queue with no active turn. Drain them now (bin/fm-wake-drain.sh), handle each, then re-arm the watcher (bin/fm-watch-arm.sh)."
   if _inject_marked "$msg" "$target"; then
-    _poke_queue_sig "$state" > "$state/.subsuper-poke-sig"
+    _poke_queue_sig_into sig "$state"
+    printf '%s\n' "$sig" > "$state/.subsuper-poke-sig"
     log "poke sent: ${n} stranded wake(s) in queue"
   else
     log "poke deferred: pane busy/pending or submit unconfirmed"
@@ -913,7 +1418,7 @@ is_wake_reason() {  # <reason>
 # --- dispatch one wake reason to self-handle or escalate --------------------
 # Side effects: logging, marker records, escalation buffer appends.
 handle_wake() {  # <reason> <state>
-  local reason=$1 state=$2 decision action distilled
+  local reason=$1 state=$2 decision action distilled batch
   local kind="" arg=""
   if should_force_self "$reason"; then
     log "wake force-self (FM_INJECT_SKIP): $reason"
@@ -930,14 +1435,24 @@ handle_wake() {  # <reason> <state>
   esac
   action=${decision%%|*}
   distilled=${decision#*|}
-  if [ "$action" = "escalate" ]; then
+  # The classifiers return their decision on stdout, so `action` is the one
+  # branched-on value here that still crosses a substitution: they have no _into
+  # form, and giving them one is a refactor of code this incident did not touch
+  # and whose stdout contract the daemon's own tests pin. What IS in scope is the
+  # DIRECTION, and it used to point at silence: a `[ "$action" = "escalate" ]`
+  # test reads a prepended stuck-buffer flush as neither verb and self-handles,
+  # dropping the escalation. Only the literal "self" self-handles now, so an
+  # unreadable decision escalates, exactly as classify_unknown already does with
+  # an unrecognised wake.
+  if [ "$action" != "self" ]; then
     log "escalate: $reason -> $distilled"
     escalate_add "$state" "$distilled"
     # A terminal-stale escalate must not leave a persistence marker behind, or
     # housekeeping re-escalates the same pane as a false wedge later.
     [ "$kind" = "stale" ] && stale_marker_remove "$arg" "$state"
     mark_escalated_seen "$kind" "$arg" "$state"
-    [ "${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}" -le 0 ] && { escalate_flush "$state" || true; }
+    _env_int_into batch FM_ESCALATE_BATCH_SECS "$ESCALATE_BATCH_SECS_DEFAULT"
+    [ "$batch" -le 0 ] && { escalate_flush "$state" || true; }
   else
     # Transient (non-terminal) stale: record/refresh the marker so housekeeping
     # can age it; the persistence recheck, not this wake, escalates a wedge.
@@ -952,12 +1467,21 @@ handle_wake() {  # <reason> <state>
 log() { [ -n "${LOG:-}" ] && printf '[%s] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >> "$LOG"; }
 
 trim_log() {
-  local sz tmp
+  local raw sz tmp max keep
   [ -n "${LOG:-}" ] || return 0
-  sz=$(wc -c < "$LOG" 2>/dev/null) || return 0
-  [ "$sz" -ge "${FM_LOG_MAX_BYTES:-$LOG_MAX_BYTES_DEFAULT}" ] || return 0
+  # BSD wc left-pads ("  192505"), so this is one of the raw values that broke
+  # the daemon's comparisons; 0 means "do not trim", the non-destructive default.
+  raw=$(wc -c < "$LOG" 2>/dev/null) || return 0
+  _as_int_into sz "$raw" 0 'log-size'
+  _env_int_into max FM_LOG_MAX_BYTES "$LOG_MAX_BYTES_DEFAULT"
+  [ "$sz" -ge "$max" ] || return 0
+  # Branched on mktemp's STATUS, not on the captured path, and a polluted path
+  # makes the tail write below fail so the log is left untrimmed rather than
+  # replaced from a bad source. That is the non-destructive direction for a
+  # value that only ever names a scratch file.
   tmp=$(mktemp "${TMPDIR:-/tmp}/fm-daemon-log.XXXXXX") || return 0
-  tail -n "${FM_LOG_KEEP_LINES:-$LOG_KEEP_LINES_DEFAULT}" "$LOG" >"$tmp" 2>/dev/null && mv -f "$tmp" "$LOG"
+  _env_int_into keep FM_LOG_KEEP_LINES "$LOG_KEEP_LINES_DEFAULT"
+  tail -n "$keep" "$LOG" >"$tmp" 2>/dev/null && mv -f "$tmp" "$LOG"
 }
 
 # ============================================================================
@@ -966,9 +1490,17 @@ trim_log() {
 # ============================================================================
 
 fm_super_main() {
-  local STATE
-  STATE="$(_state_root)"
+  # Initialised here, not just declared: fm-wake-lib.sh assigns a global STATE
+  # and this file sources it inside a subshell, so a bare `local STATE` leaves
+  # the linter resolving these reads to that subshell write (SC2031). The value
+  # is overwritten on the next line either way.
+  local STATE=""
+  _state_root_into STATE
   mkdir -p "$STATE"
+  # Where _int_warn keeps its per-context stderr throttle markers. Global (not
+  # local) so command substitutions see it; unset when the pure functions are
+  # sourced by tests, which then warn on every occurrence.
+  FM_DAEMON_WARN_STATE="$STATE"
 
   # Source the portable lock helpers (works on macOS where flock is absent).
   # Export FM_STATE_OVERRIDE so the lib resolves the same state dir.
@@ -980,11 +1512,20 @@ fm_super_main() {
   local WATCH_ERR="$STATE/.supervise-daemon.watcher.err"
   local LOCK="$STATE/.supervise-daemon.lock"
   local PIDFILE="$STATE/.supervise-daemon.pid"
-  local INJECT_FAIL_SLEEP=${FM_INJECT_FAIL_SLEEP:-$INJECT_FAIL_SLEEP_DEFAULT}
-  local CRASH_THRESHOLD=${FM_CRASH_THRESHOLD:-$CRASH_THRESHOLD_DEFAULT}
-  local CRASH_WINDOW=${FM_CRASH_WINDOW:-$CRASH_WINDOW_DEFAULT}
-  local CRASH_BACKOFF=${FM_CRASH_BACKOFF:-$CRASH_BACKOFF_DEFAULT}
-  local CRASH_NORMAL_SLEEP=${FM_CRASH_NORMAL_SLEEP:-$CRASH_NORMAL_SLEEP_DEFAULT}
+  # Coerced like every other numeric input, and read into variables rather than
+  # captured, so no value crosses a substitution on its way here. The ones that
+  # feed `sleep` are read with a positive floor as well: a malformed value
+  # (FM_CRASH_NORMAL_SLEEP=" 5 ") and a non-positive one (0, -1) both make
+  # `sleep` return at once or fail outright, turning the watcher-restart path
+  # into a tight spin rather than merely disabling a check. The two that feed
+  # only comparisons keep the plain integer read, because a threshold of 0 is a
+  # meaningful setting where a delay of 0 is not.
+  local INJECT_FAIL_SLEEP CRASH_THRESHOLD CRASH_WINDOW CRASH_BACKOFF CRASH_NORMAL_SLEEP
+  _env_pos_int_into INJECT_FAIL_SLEEP FM_INJECT_FAIL_SLEEP "$INJECT_FAIL_SLEEP_DEFAULT"
+  _env_int_into CRASH_THRESHOLD FM_CRASH_THRESHOLD "$CRASH_THRESHOLD_DEFAULT"
+  _env_int_into CRASH_WINDOW FM_CRASH_WINDOW "$CRASH_WINDOW_DEFAULT"
+  _env_pos_int_into CRASH_BACKOFF FM_CRASH_BACKOFF "$CRASH_BACKOFF_DEFAULT"
+  _env_pos_int_into CRASH_NORMAL_SLEEP FM_CRASH_NORMAL_SLEEP "$CRASH_NORMAL_SLEEP_DEFAULT"
 
   [ -x "$WATCH" ] || { echo "error: watcher not found or not executable: $WATCH" >&2; exit 1; }
 
@@ -1032,7 +1573,17 @@ fm_super_main() {
 
   local afk_status="off"
   afk_active "$STATE" && afk_status="on"
-  log "daemon starting (pid $$); target=$TARGET; target_source=$target_source; afk=$afk_status; inject_skip='${FM_INJECT_SKIP:-$INJECT_SKIP_DEFAULT}'; stale_escalate=${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}s; batch=${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}s; always-on liveness: guard_grace=${FM_GUARD_GRACE:-$GUARD_GRACE_DEFAULT}s; poke_after=${FM_POKE_AFTER_SECS:-$POKE_AFTER_SECS_DEFAULT}s; poke_min_interval=${FM_POKE_MIN_INTERVAL:-$POKE_MIN_INTERVAL_DEFAULT}s"
+  # The COERCED values, which are what every decision below actually runs on. A
+  # malformed override is replaced silently in the code, so printing the raw one
+  # here would answer "what config is this daemon running with" with a value the
+  # daemon is not using, and a buffer-polluted override would split this record.
+  local cfg_stale cfg_batch cfg_grace cfg_poke cfg_poke_min
+  _env_int_into cfg_stale FM_STALE_ESCALATE_SECS "$STALE_ESCALATE_SECS_DEFAULT"
+  _env_int_into cfg_batch FM_ESCALATE_BATCH_SECS "$ESCALATE_BATCH_SECS_DEFAULT"
+  _env_int_into cfg_grace FM_GUARD_GRACE "$GUARD_GRACE_DEFAULT"
+  _env_int_into cfg_poke FM_POKE_AFTER_SECS "$POKE_AFTER_SECS_DEFAULT"
+  _env_int_into cfg_poke_min FM_POKE_MIN_INTERVAL "$POKE_MIN_INTERVAL_DEFAULT"
+  log "daemon starting (pid $$); target=$TARGET; target_source=$target_source; afk=$afk_status; inject_skip='${FM_INJECT_SKIP:-$INJECT_SKIP_DEFAULT}'; stale_escalate=${cfg_stale}s; batch=${cfg_batch}s; always-on liveness: guard_grace=${cfg_grace}s; poke_after=${cfg_poke}s; poke_min_interval=${cfg_poke_min}s"
 
   # --- shutdown: flush buffered escalations, reap child, release lock -------
   local WATCHER_PID="" CUR_TMP=""
@@ -1057,7 +1608,15 @@ fm_super_main() {
   local crash_times=() backoff_secs=$CRASH_NORMAL_SLEEP
   record_crash() {
     local now t
-    now=$(_now)
+    # An unusable clock cannot be stamped into the crash window without
+    # poisoning it, so the window is left alone and the restart takes the normal
+    # sleep. The daemon keeps restarting the watcher; only the burst detector
+    # sits this one out.
+    _now_into now || {
+      log "ERROR: unreadable clock; crash-loop window not updated for this restart"
+      backoff_secs=$CRASH_NORMAL_SLEEP
+      return 0
+    }
     local -a keep=()
     for t in "${crash_times[@]:-}"; do
       [ -n "$t" ] && [ $((now - t)) -lt "$CRASH_WINDOW" ] && keep+=("$t")
@@ -1079,16 +1638,29 @@ fm_super_main() {
     WATCHER_PID=$!
   }
 
-  local rc reason PRESENT_TICK
-  PRESENT_TICK=${FM_PRESENT_TICK:-$PRESENT_TICK_DEFAULT}
+  # Loop cadences are read ONCE here. The two that reach `sleep` go through the
+  # POSITIVE-floor form, because an override that made `sleep` return at once
+  # (0) or fail outright (a negative, or a malformed value) would turn this into
+  # a busy loop calling the whole liveness layer continuously, rather than
+  # merely disabling a check. A non-positive value there is malformed, so it
+  # falls back to the documented default, loudly.
+  # FM_SECONDMATE_PROBE_TICK reaches no `sleep` - it is only ever the threshold
+  # in the throttle_ready comparison below - so it keeps the plain integer read,
+  # under the same rule as FM_ESCALATE_BATCH_SECS and FM_MAX_DEFER_SECS: a
+  # threshold of 0 is a meaningful setting (probe on every tick) where a delay
+  # of 0 is not.
+  local rc reason PRESENT_TICK SECONDMATE_PROBE_TICK HOUSEKEEP_TICK
+  _env_pos_int_into PRESENT_TICK FM_PRESENT_TICK "$PRESENT_TICK_DEFAULT"
+  _env_pos_int_into HOUSEKEEP_TICK FM_HOUSEKEEPING_TICK "$HOUSEKEEPING_TICK_DEFAULT"
+  _env_int_into SECONDMATE_PROBE_TICK FM_SECONDMATE_PROBE_TICK "$HOUSEKEEP_TICK"
   while true; do
     # --- secondmate dead-turn probe (BOTH modes, tick-gated) ---------------
     # A dead secondmate turn writes no status and the watcher exempts secondmate
     # panes from stale detection, so this cheap pane probe is the only thing that
     # can surface it. It only enqueues a durable wake (no classification), so it
     # is additive to afk behavior; present mode surfaces it via the poke below.
-    if [ "$(_file_age "$STATE/.subsuper-last-secondmate-probe")" -ge "${FM_SECONDMATE_PROBE_TICK:-${FM_HOUSEKEEPING_TICK:-$HOUSEKEEPING_TICK_DEFAULT}}" ]; then
-      _now > "$STATE/.subsuper-last-secondmate-probe"
+    if throttle_ready "$STATE/.subsuper-last-secondmate-probe" "$SECONDMATE_PROBE_TICK"; then
+      _stamp_now "$STATE/.subsuper-last-secondmate-probe"
       secondmate_deadturn_probe "$STATE"
     fi
 
@@ -1161,7 +1733,7 @@ fm_super_main() {
         if ! is_wake_reason "$reason"; then
           log "watcher non-wake stdout, idling: $reason"
           WATCHER_PID=""
-          sleep "${HOUSEKEEPING_TICK:-$HOUSEKEEPING_TICK_DEFAULT}"
+          sleep "$HOUSEKEEP_TICK"
           continue
         fi
         log "wake: $reason"
@@ -1177,8 +1749,8 @@ fm_super_main() {
     # enough that batch flushes, stale rechecks, and the catch-all scan fire on
     # cadence. Gating keeps a large fleet cheap between ticks.
     sleep 1
-    if [ "$(_file_age "$STATE/.subsuper-last-housekeep")" -ge "${FM_HOUSEKEEPING_TICK:-$HOUSEKEEPING_TICK_DEFAULT}" ]; then
-      _now > "$STATE/.subsuper-last-housekeep"
+    if throttle_ready "$STATE/.subsuper-last-housekeep" "$HOUSEKEEP_TICK"; then
+      _stamp_now "$STATE/.subsuper-last-housekeep"
       housekeeping "$STATE"
     fi
   done

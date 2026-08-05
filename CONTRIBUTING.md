@@ -42,6 +42,10 @@ See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/star
   Each starts with a usage header comment; keep it accurate when you change behavior.
   Test scripts and helpers in `tests/` are plain bash too.
   `shellcheck bin/*.sh tests/*.sh` must pass, and CI enforces it.
+  In a test, always `mkdir -p` a case directory under `TMP_ROOT` before writing into it.
+  `fm_test_tmproot` registers its cleanup trap from inside a command substitution, and bash runs an `EXIT` trap when that subshell exits, so the root is already gone by the time the path is echoed back.
+  Every existing suite works only because it recreates its own case directories.
+  The helper's own header comment in `tests/lib.sh` describes this accurately; the underlying trap defect is tracked as its own work item.
 - CI also guards the shape of the tree: tracked files at the repo root are limited to a small allowlist, and every tracked path may use only `[A-Za-z0-9._/-]`.
   Both jobs exist because a mis-quoted shell redirect once committed a junk-named duplicate of the test suite that every other job passed.
   A deliberate new root file or unusual path name is a one-line change to the matching job in `.github/workflows/ci.yml`.
@@ -67,6 +71,7 @@ tests/fm-watcher-lock.test.sh             # watcher singleton, lock-race, watch-
 tests/fm-watch-triage.test.sh             # always-on watcher triage: benign absorb, actionable surface, stale wedge threshold, heartbeat backstop, and afk one-shot coherence
 tests/fm-daemon.test.sh                   # sub-supervisor classifier, /afk presence-gating, max-defer, composer, and fm-send submit tests
 tests/fm-liveness-daemon.test.sh          # always-on (present-mode) liveness layer: watcher-liveness backstop, stranded-wake session-poke matrix, and secondmate dead-turn probe tests
+tests/fm-daemon-numeric.test.sh           # daemon numeric-value hardening: whitespace-padded and stuck-output-buffer values coerced, unusable values warned loudly, no invented epochs, throttled actions firing every tick under an unreadable clock, positive-floored sleep cadences, unknown durations never printed as seconds, structural guards that liveness decisions compare only variables, and the watcher-liveness backstop still arming under a polluted beacon read
 tests/fm-send-settle.test.sh              # fm-send post-submit settle pause, tuning, disable, and --key bypass tests
 tests/fm-send-popup-settle.test.sh        # fm-send pre-Enter popup-settle selection for slash commands and codex $skill invocations
 tests/fm-send-secondmate-marker.test.sh   # fm-send from-firstmate marker for kind=secondmate targets: marked vs crewmate/explicit/--key, and the exact marker byte sequence
@@ -87,7 +92,7 @@ tests/fm-secondmate-safety.test.sh        # secondmate home safety, idle charter
 tests/fm-teardown.test.sh                 # fm-teardown.sh landed-work safety and reminder checks: fork-remote allow, squash/content landings, dirty and unlanded refusals, PR-head metadata, tasks-axi reminder, --force override
 tests/fm-crew-state.test.sh               # fm-crew-state.sh current-state reconciliation: run-step authority including closed panes, stale needs-decision/blocked superseded by a resumed run, genuine-parked, cross-branch attribution, pane/status-log fallback, scout skip, torn-down/missing-meta graceful
 tests/fm-git-author.test.sh               # config/git-author agent commit identity: parsing, per-field apply, idempotence, absent no-op, conflict-preserve, malformed warn-once, spawn worktree and bootstrap primary integration
-tests/fm-busyshell.test.sh                # claude background-shell footer busy signature: both live footer forms, plural shells, transcript-prose and unanchored-footer negatives, spinner distinctness, harness=claude gating, preserved run-step-first order
+tests/fm-busyshell.test.sh                # claude background-shell footer busy signature: both live footer forms, plural shells, shell+monitor lists, transcript-prose and unanchored-footer negatives, spinner distinctness, harness=claude gating, preserved run-step-first order
 [ "$(readlink CLAUDE.md)" = "AGENTS.md" ]
 [ "$(readlink .claude/skills)" = "../.agents/skills" ]
 tmp=$(mktemp -d) && printf 'done: smoke\n' > "$tmp/smoke.status" && FM_STATE_OVERRIDE="$tmp" FM_SIGNAL_GRACE=1 FM_POLL=1 FM_HEARTBEAT=999999 bin/fm-watch-arm.sh  # watcher re-arm smoke test (prints arm status, then an actionable signal)

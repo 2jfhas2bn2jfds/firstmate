@@ -46,13 +46,15 @@ Natural language is acceptable if uncertain.
 
 | Fact | Value |
 |---|---|
-| Busy-pane signature | `esc to interrupt` (mid-turn); also `<N> shell(s) still running` / the `· <N> shell` footer segment when idle-waiting on a background shell |
+| Busy-pane signature | `esc to interrupt` (mid-turn); also `<N> shell(s) still running`, the comma-separated `<N> shells, <N> monitor still running` list, and the `· <N> shell` footer segment when idle-waiting on a background shell or monitor |
 | Exit command | `/exit` |
 | Interrupt | single Escape |
 | Skill invocation | `/<skill>` (e.g. `/no-mistakes`) |
 
 Claude has a second verified busy signature (observed live 2026-07-12).
 When a crew ends its turn but is idle-waiting on its own running background shell (a no-mistakes pipeline, a long RN build, a test run), the pane shows no `esc to interrupt` spinner - the turn is over - only a footer segment naming the still-running shell(s), in one of these forms: `✻ Cooked for 1m 4s · 1 shell still running`, `⏵⏵ bypass permissions on · 1 shell · ← for agents`, or `N shell(s) still running`.
+Claude also runs background monitors alongside shells and renders them as ONE comma-separated list before a single trailing `still running` (verified in the field 2026-07-31), so the same footer also appears as `2 shells, 1 monitor still running` or `✻ Cooked for 2m 1s · 1 shell, 1 monitor still running`.
+A crew idle-waiting on its own monitor is working exactly like one idle-waiting on a shell, so every one of these forms counts.
 That footer means the crew is still working, so the pane-side busy detection in `bin/fm-tmux-lib.sh` (`fm_pane_has_bg_shell`, consulted by `bin/fm-crew-state.sh` for a `harness=claude` target) counts it as provably working, which stops false stale/wedge wakes on a healthy crew during long validations.
 It is a claude-specific footer, so it is gated on `harness=claude`.
 
