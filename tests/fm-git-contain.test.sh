@@ -262,9 +262,13 @@ test_no_uncontained_call_sites() {
       "$ROOT"/bin/*.sh 2>/dev/null \
       | grep -vE ':[0-9]+:[[:space:]]*#' \
       | grep -vE 'git[[:space:]]+-C[[:space:]]+"[^"]*"[[:space:]]+config[[:space:]]' \
-      | grep -v '/bin/fm-brief.sh:' \
       || true
   )
+  # No per-file exclusions. A blanket exemption that no test covers would
+  # silently exempt a real git call site added to that file later - the exact
+  # decay this lint exists to prevent. If brief prose ever legitimately needs a
+  # git line in a heredoc, narrow an exclusion to THAT line at THAT time, with a
+  # comment explaining it; never re-add a whole-file grep -v.
   [ -n "$offenders" ] \
     && fail "uncontained git call sites in bin/ (route them through fm_git, see bin/fm-git-contain-lib.sh):"$'\n'"$offenders"
 
@@ -334,6 +338,53 @@ test_fm_git_passthrough() {
   pass "P6 fm_git passes stdout and exit status through and persists no config"
 }
 
+# --- P7: fm_git refuses push ------------------------------------------------
+# The -c core.hooksPath=/dev/null propagates via GIT_CONFIG_PARAMETERS into
+# locally-spawned transport processes; for a file-path remote git-receive-pack
+# is a direct child and inherits it, silently suppressing SERVER-SIDE
+# pre-receive/update/post-receive hooks - including the local no-mistakes bare
+# gate's post-receive. The P5 lint funnels every new git call site into fm_git,
+# so refusal must be the default shape a future push author hits. The fixture
+# is a push that would SUCCEED as plain git, so removing the guard fails this
+# test on the exit code as well as on the message assertions.
+test_fm_git_refuses_push() {
+  local repo remote remote_abs out code
+  # shellcheck source=bin/fm-git-contain-lib.sh
+  . "$ROOT/bin/fm-git-contain-lib.sh"
+  repo="$TMP_ROOT/push-guard/work"
+  remote="$TMP_ROOT/push-guard/remote.git"
+  mkdir -p "$TMP_ROOT/push-guard"
+  git init -q "$repo"
+  git -C "$repo" symbolic-ref HEAD refs/heads/main
+  git -C "$repo" commit -q --allow-empty -m only
+  git init -q --bare "$remote"
+  remote_abs=$(cd "$remote" && pwd)
+  git -C "$repo" remote add origin "file://$remote_abs"
+
+  set +e
+  out=$(fm_git -C "$repo" push origin main 2>&1)
+  code=$?
+  set -e
+  [ "$code" != 0 ] || fail "fm_git ran 'git push' instead of refusing it"
+  assert_contains "$out" "refusing 'git push'" "the push refusal did not announce itself"
+  assert_contains "$out" "core.hooksPath=/dev/null" \
+    "the push refusal does not name the containment flag that makes push unsafe"
+  assert_contains "$out" "GIT_CONFIG_PARAMETERS" \
+    "the push refusal does not name the propagation mechanism"
+  assert_contains "$out" "git-receive-pack" \
+    "the push refusal does not name the inheriting transport child"
+  assert_contains "$out" "pre-receive/update/post-receive" \
+    "the push refusal does not name the server-side hooks that would be suppressed"
+  [ "$(git -C "$remote" rev-parse --verify --quiet refs/heads/main || true)" = "" ] \
+    || fail "fm_git pushed to the remote despite the guard"
+
+  # Control: the same push succeeds as plain git, so the refusal above cannot
+  # have been the push failing on its own.
+  git -C "$repo" push -q origin main 2>/dev/null \
+    || fail "fixture: the control push failed, so the refusal assertion proves nothing"
+  pass "P7 fm_git refuses 'git push' loudly, naming the server-side hook suppression"
+}
+
 test_positive_control_hooks_fire
 test_flag_suppresses_hooks
 test_fleet_sync_contained
@@ -343,5 +394,6 @@ test_review_diff_contained
 test_no_uncontained_call_sites
 test_lint_catches_a_new_call_site
 test_fm_git_passthrough
+test_fm_git_refuses_push
 
 echo "# all fm-git-contain tests passed"

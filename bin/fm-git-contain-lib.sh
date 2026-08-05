@@ -48,6 +48,32 @@
 # fm_git <git args...>: run git with committed hooks disabled for this
 # invocation. A drop-in replacement for `git` at every firstmate automation call
 # site; exit status, stdout, and stderr pass through unchanged.
+#
+# PUSH IS REFUSED, not contained. The -c override propagates via
+# GIT_CONFIG_PARAMETERS into every locally-spawned sub-git, and for a push to a
+# file-path remote git-receive-pack is a direct child, so it inherits
+# core.hooksPath=/dev/null and the remote's SERVER-SIDE
+# pre-receive/update/post-receive hooks are silently suppressed - including the
+# local no-mistakes bare gate's own post-receive, i.e. the very gate this fleet
+# ships through. The P5 lint funnels every new git call site in bin/ into
+# fm_git, so without this guard a silent server-side hook bypass would be the
+# DEFAULT path for any push added later. Refusing loudly (rather than silently
+# running push uncontained) forces that future author to decide explicitly:
+# a push whose server-side hooks matter must not go through fm_git at all.
 fm_git() {
+  local arg subcmd='' skip=0
+  for arg in "$@"; do
+    if [ "$skip" = 1 ]; then skip=0; continue; fi
+    case "$arg" in
+      -C|-c|--git-dir|--work-tree|--namespace|--config-env) skip=1 ;;
+      -*) ;;
+      *) subcmd=$arg; break ;;
+    esac
+  done
+  if [ "$subcmd" = push ]; then
+    printf '%s\n' \
+      "fm_git: refusing 'git push': fm_git sets core.hooksPath=/dev/null, which propagates via GIT_CONFIG_PARAMETERS into locally-spawned transport processes; for a file-path remote git-receive-pack is a direct child and inherits it, so SERVER-SIDE pre-receive/update/post-receive hooks would be silently suppressed, including the local no-mistakes bare gate's post-receive. Push through plain git from a call site that has decided its server-side hooks explicitly." >&2
+    return 1
+  fi
   git -c core.hooksPath=/dev/null "$@"
 }
