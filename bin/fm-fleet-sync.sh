@@ -21,6 +21,8 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+# shellcheck source=bin/fm-git-contain-lib.sh
+. "$SCRIPT_DIR/fm-git-contain-lib.sh"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 "$FM_ROOT/bin/fm-guard.sh" || true
 
@@ -44,13 +46,13 @@ project_label() {
 
 default_branch() {
   local ref branch
-  ref=$(git -C "$PROJ" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
+  ref=$(fm_git -C "$PROJ" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
   if [ -n "$ref" ]; then
     echo "${ref#origin/}"
     return 0
   fi
   for branch in main master; do
-    if git -C "$PROJ" show-ref --verify --quiet "refs/heads/$branch"; then
+    if fm_git -C "$PROJ" show-ref --verify --quiet "refs/heads/$branch"; then
       echo "$branch"
       return 0
     fi
@@ -76,9 +78,9 @@ prune_gone_branches() {
   [ "${FM_FLEET_PRUNE:-1}" != "0" ] || return 0
 
   local worktree_branches current refline branch track
-  worktree_branches=$(git -C "$PROJ" worktree list --porcelain 2>/dev/null \
+  worktree_branches=$(fm_git -C "$PROJ" worktree list --porcelain 2>/dev/null \
     | sed -n 's#^branch refs/heads/##p')
-  current=$(git -C "$PROJ" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+  current=$(fm_git -C "$PROJ" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
 
   while IFS= read -r refline; do
     branch=${refline%% *}
@@ -89,10 +91,10 @@ prune_gone_branches() {
     if printf '%s\n' "$worktree_branches" | grep -Fxq -- "$branch"; then
       continue
     fi
-    if git -C "$PROJ" branch -D -- "$branch" >/dev/null 2>&1; then
+    if fm_git -C "$PROJ" branch -D -- "$branch" >/dev/null 2>&1; then
       echo "$label: pruned $branch"
     fi
-  done < <(git -C "$PROJ" for-each-ref \
+  done < <(fm_git -C "$PROJ" for-each-ref \
     --format='%(refname:short) %(upstream:track)' refs/heads 2>/dev/null)
 }
 
@@ -100,14 +102,14 @@ prune_gone_branches() {
 # to it here). The current worktree is detached when this is consulted, so any
 # match is necessarily another worktree.
 default_checked_out_elsewhere() {
-  git -C "$PROJ" worktree list --porcelain 2>/dev/null \
+  fm_git -C "$PROJ" worktree list --porcelain 2>/dev/null \
     | sed -n 's#^branch refs/heads/##p' \
     | grep -Fxq -- "$DEFAULT"
 }
 
 local_default_safe_for_recovery() {
-  ! git -C "$PROJ" rev-parse --verify --quiet "$DEFAULT^{commit}" >/dev/null \
-    || git -C "$PROJ" merge-base --is-ancestor "$DEFAULT" "$BASE" 2>/dev/null
+  ! fm_git -C "$PROJ" rev-parse --verify --quiet "$DEFAULT^{commit}" >/dev/null \
+    || fm_git -C "$PROJ" merge-base --is-ancestor "$DEFAULT" "$BASE" 2>/dev/null
 }
 
 # Human-readable name for the unsafe state the clone is in, used in the STUCK
@@ -119,7 +121,7 @@ stuck_state() {
     s="branch $cur"
   elif [ "$dirty" = yes ]; then
     s="detached HEAD"
-  elif ! git -C "$PROJ" merge-base --is-ancestor HEAD "$BASE" 2>/dev/null; then
+  elif ! fm_git -C "$PROJ" merge-base --is-ancestor HEAD "$BASE" 2>/dev/null; then
     s="detached HEAD with unique commits"
   elif default_checked_out_elsewhere; then
     s="detached HEAD ($DEFAULT checked out in another worktree)"
@@ -137,7 +139,7 @@ stuck_state() {
 # distinct from a benign one-off skip.
 report_stuck() {
   local state=$1 behind
-  behind=$(git -C "$PROJ" rev-list --count "HEAD..$BASE" 2>/dev/null) || behind="?"
+  behind=$(fm_git -C "$PROJ" rev-list --count "HEAD..$BASE" 2>/dev/null) || behind="?"
   echo "$label: STUCK: on $state, $behind commits behind $BASE - needs attention"
 }
 
@@ -149,7 +151,7 @@ sync_project() {
     echo "$label: skipped: not a directory"
     return 0
   fi
-  if ! git -C "$PROJ" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  if ! fm_git -C "$PROJ" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     echo "$label: skipped: not a git repo"
     return 0
   fi
@@ -159,12 +161,12 @@ sync_project() {
     echo "$label: skipped: local-only project"
     return 0
   fi
-  if ! git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
+  if ! fm_git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
     echo "$label: skipped: no origin remote"
     return 0
   fi
 
-  if ! fetch_output=$(git -C "$PROJ" fetch origin --prune --quiet 2>&1); then
+  if ! fetch_output=$(fm_git -C "$PROJ" fetch origin --prune --quiet 2>&1); then
     reason="fetch failed"
     if [ -n "$fetch_output" ]; then
       reason="$reason: $(first_line "$fetch_output")"
@@ -180,14 +182,14 @@ sync_project() {
     return 0
   }
   BASE="origin/$DEFAULT"
-  if ! git -C "$PROJ" rev-parse --verify --quiet "$BASE^{commit}" >/dev/null; then
+  if ! fm_git -C "$PROJ" rev-parse --verify --quiet "$BASE^{commit}" >/dev/null; then
     echo "$label: skipped: $BASE does not exist"
     return 0
   fi
 
-  cur=$(git -C "$PROJ" symbolic-ref --short HEAD 2>/dev/null || echo "")
+  cur=$(fm_git -C "$PROJ" symbolic-ref --short HEAD 2>/dev/null || echo "")
   dirty=no
-  [ -z "$(git -C "$PROJ" status --porcelain 2>/dev/null | head -1)" ] || dirty=yes
+  [ -z "$(fm_git -C "$PROJ" status --porcelain 2>/dev/null | head -1)" ] || dirty=yes
   recovered=no
 
   if [ "$cur" != "$DEFAULT" ]; then
@@ -200,10 +202,10 @@ sync_project() {
     # or <default> already checked out elsewhere - may hold real work, so it is
     # reported loudly and left untouched.
     if [ -z "$cur" ] && [ "$dirty" = no ] \
-        && git -C "$PROJ" merge-base --is-ancestor HEAD "$BASE" 2>/dev/null \
+        && fm_git -C "$PROJ" merge-base --is-ancestor HEAD "$BASE" 2>/dev/null \
         && ! default_checked_out_elsewhere \
         && local_default_safe_for_recovery; then
-      if ! git -C "$PROJ" checkout --quiet "$DEFAULT" 2>/dev/null; then
+      if ! fm_git -C "$PROJ" checkout --quiet "$DEFAULT" 2>/dev/null; then
         report_stuck "$(stuck_state)"
         return 0
       fi
@@ -219,16 +221,16 @@ sync_project() {
     return 0
   fi
 
-  if ! git -C "$PROJ" rev-parse --verify --quiet "$DEFAULT^{commit}" >/dev/null; then
+  if ! fm_git -C "$PROJ" rev-parse --verify --quiet "$DEFAULT^{commit}" >/dev/null; then
     echo "$label: skipped: local $DEFAULT does not exist"
     return 0
   fi
 
-  local_rev=$(git -C "$PROJ" rev-parse "$DEFAULT") || {
+  local_rev=$(fm_git -C "$PROJ" rev-parse "$DEFAULT") || {
     echo "$label: skipped: cannot read local $DEFAULT"
     return 0
   }
-  remote_rev=$(git -C "$PROJ" rev-parse "$BASE") || {
+  remote_rev=$(fm_git -C "$PROJ" rev-parse "$BASE") || {
     echo "$label: skipped: cannot read $BASE"
     return 0
   }
@@ -240,16 +242,16 @@ sync_project() {
     fi
     return 0
   fi
-  if ! git -C "$PROJ" merge-base --is-ancestor "$DEFAULT" "$BASE"; then
+  if ! fm_git -C "$PROJ" merge-base --is-ancestor "$DEFAULT" "$BASE"; then
     report_stuck "diverged $DEFAULT"
     return 0
   fi
 
-  before=$(git -C "$PROJ" rev-parse --short "$DEFAULT") || {
+  before=$(fm_git -C "$PROJ" rev-parse --short "$DEFAULT") || {
     echo "$label: skipped: cannot read local $DEFAULT"
     return 0
   }
-  if ! merge_output=$(git -C "$PROJ" merge --ff-only "$BASE" 2>&1); then
+  if ! merge_output=$(fm_git -C "$PROJ" merge --ff-only "$BASE" 2>&1); then
     reason="fast-forward failed"
     if [ -n "$merge_output" ]; then
       reason="$reason: $(first_line "$merge_output")"
@@ -257,7 +259,7 @@ sync_project() {
     echo "$label: skipped: $reason"
     return 0
   fi
-  after=$(git -C "$PROJ" rev-parse --short "$DEFAULT") || {
+  after=$(fm_git -C "$PROJ" rev-parse --short "$DEFAULT") || {
     echo "$label: skipped: fast-forward completed but cannot read local $DEFAULT"
     return 0
   }

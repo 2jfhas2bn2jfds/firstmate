@@ -20,6 +20,8 @@
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_HOME="${FM_HOME:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+# shellcheck source=bin/fm-git-contain-lib.sh
+. "$SCRIPT_DIR/fm-git-contain-lib.sh"
 RECLAIM_AT="${1:-15}"        # GB: reclaim when free falls below this
 HARD_FLOOR="${2:-10}"        # GB: block the build if still below this after reclaim
 KEEP_RUNTIMES="${FM_KEEP_SIM_RUNTIMES:-2}"
@@ -111,8 +113,8 @@ for meta in "$FM_HOME"/state/*.meta; do
   fi
 
   # Only now: is it safe to lose? fm-teardown re-checks and refuses unlanded work.
-  dirty="$(git -C "$wt" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
-  onremote="$(git -C "$wt" branch -r --contains HEAD 2>/dev/null | grep -c .)"
+  dirty="$(fm_git -C "$wt" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
+  onremote="$(fm_git -C "$wt" branch -r --contains HEAD 2>/dev/null | grep -c .)"
   if [ "$dirty" = "0" ] && [ "$onremote" -gt 0 ]; then
     "$SCRIPT_DIR/fm-teardown.sh" "$id" >/dev/null 2>&1 && echo "  torn down abandoned workspace: $id"
   fi

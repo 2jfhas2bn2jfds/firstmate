@@ -37,6 +37,8 @@ PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 REG="$DATA/secondmates.md"
 # shellcheck source=bin/fm-fleet-home-lib.sh
 . "$SCRIPT_DIR/fm-fleet-home-lib.sh"
+# shellcheck source=bin/fm-git-contain-lib.sh
+. "$SCRIPT_DIR/fm-git-contain-lib.sh"
 # One definition of the secondmate marker: the fleet-register redirection keys on
 # this name, so a second copy here could rename out of step and split "is this a
 # secondmate home?" between call sites with no symptom.
@@ -455,14 +457,14 @@ normalize_origin_url() {
 
 source_origin_url() {
   local project=$1 mode=$2 src=$3 url
-  url=$(git -C "$src" remote get-url origin 2>/dev/null || true)
+  url=$(fm_git -C "$src" remote get-url origin 2>/dev/null || true)
   [ -n "$url" ] || { echo "error: project $project is $mode but has no origin remote" >&2; return 1; }
   normalize_origin_url "$src" "$url"
 }
 
 seeded_origin_url() {
   local project=$1 dst=$2 expected=$3 url
-  url=$(git -C "$dst" remote get-url origin 2>/dev/null || true)
+  url=$(fm_git -C "$dst" remote get-url origin 2>/dev/null || true)
   [ -n "$url" ] || { echo "error: seeded project $project at $dst has no origin remote; expected $expected" >&2; return 1; }
   normalize_origin_url "$dst" "$url"
 }
@@ -495,7 +497,7 @@ ensure_home() {
     [ -d "$home" ] || { echo "error: $home exists and is not a directory" >&2; return 1; }
   else
     mkdir -p "$(dirname "$home")"
-    git clone --quiet "$FM_ROOT" "$home"
+    fm_git clone --quiet "$FM_ROOT" "$home"
   fi
   verify_firstmate_home "$home"
 }
@@ -541,7 +543,7 @@ clone_project() {
   src="$PROJECTS/$project"
   dst=$(validate_project_destination "$home" "$project") || return 1
   [ -d "$src" ] || { echo "error: project $project not found at $src" >&2; return 1; }
-  git -C "$src" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "error: project $project is not a git repo" >&2; return 1; }
+  fm_git -C "$src" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "error: project $project is not a git repo" >&2; return 1; }
   read -r mode _ <<EOF
 $(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$FM_ROOT/bin/fm-project-mode.sh" "$project")
 EOF
@@ -551,7 +553,7 @@ EOF
   fi
   if [ -e "$dst" ]; then
     [ -d "$dst" ] || { echo "error: seeded project $project exists at $dst but is not a directory" >&2; return 1; }
-    git -C "$dst" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "error: seeded project $project at $dst is not a git repo" >&2; return 1; }
+    fm_git -C "$dst" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "error: seeded project $project at $dst is not a git repo" >&2; return 1; }
     url=$(source_origin_url "$project" "$mode" "$src") || return 1
     dst_url=$(seeded_origin_url "$project" "$dst" "$url") || return 1
     [ "$dst_url" = "$url" ] || {
@@ -561,14 +563,14 @@ EOF
     return 0
   fi
   url=$(source_origin_url "$project" "$mode" "$src") || return 1
-  git clone --quiet "$url" "$dst"
+  fm_git clone --quiet "$url" "$dst"
 }
 
 validate_seed_project() {
   local project=$1 src mode url
   src="$PROJECTS/$project"
   [ -d "$src" ] || { echo "error: project $project not found at $src" >&2; return 1; }
-  git -C "$src" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "error: project $project is not a git repo" >&2; return 1; }
+  fm_git -C "$src" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "error: project $project is not a git repo" >&2; return 1; }
   read -r mode _ <<EOF
 $(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$FM_ROOT/bin/fm-project-mode.sh" "$project")
 EOF
@@ -576,7 +578,7 @@ EOF
     echo "error: project $project is local-only; secondmate routes support only no-mistakes and direct-PR projects" >&2
     return 1
   fi
-  url=$(git -C "$src" remote get-url origin 2>/dev/null || true)
+  url=$(fm_git -C "$src" remote get-url origin 2>/dev/null || true)
   [ -n "$url" ] || { echo "error: project $project is $mode but has no origin remote" >&2; return 1; }
 }
 
@@ -776,7 +778,7 @@ initialize_no_mistakes_project() {
   mode=$(project_mode_in_home "$home" "$project")
   [ "$mode" = no-mistakes ] || return 0
   dst=$(validate_project_destination "$home" "$project") || return 1
-  if git -C "$dst" remote get-url no-mistakes >/dev/null 2>&1; then
+  if fm_git -C "$dst" remote get-url no-mistakes >/dev/null 2>&1; then
     return 0
   fi
   if [ "$created" != 1 ]; then

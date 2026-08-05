@@ -36,6 +36,15 @@
 # worktrees share the firstmate repo's config, and an explicitly-set identity
 # there is exactly what the conflict-preserve rule exists to protect.
 
+# The non-config git calls here go through fm_git, which disables committed hooks:
+# firstmate automation must never execute repo-committed code (see
+# bin/fm-git-contain-lib.sh). The `git ... config` reads and writes below stay
+# bare, and that is the whole carve-out - the containment flag is itself config,
+# so routing config through it would perturb the values this library inspects.
+# Config reads and writes run no hook, so nothing here is left uncontained.
+# shellcheck source=bin/fm-git-contain-lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-git-contain-lib.sh"
+
 # fm_git_author_warn <config-file>: emit at most one malformed-config warning per
 # process, so a script that calls apply in a loop never spams stderr.
 fm_git_author_warn() {
@@ -92,7 +101,7 @@ fm_git_author_apply() {
   vals=$(fm_git_author_values "$cfg") || return 0
   name=${vals%%$'\t'*}
   email=${vals#*$'\t'}
-  git -C "$dir" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
+  fm_git -C "$dir" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
   cur_name=$(git -C "$dir" config --local user.name 2>/dev/null || true)
   cur_email=$(git -C "$dir" config --local user.email 2>/dev/null || true)
   if [ -z "$cur_name" ]; then

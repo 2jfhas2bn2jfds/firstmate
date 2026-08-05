@@ -26,6 +26,11 @@
 # spawn path does) authoritative.
 # shellcheck source=bin/fm-fleet-home-lib.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-fleet-home-lib.sh"
+# Every git call in this library goes through fm_git, which disables committed
+# hooks: firstmate automation must never execute repo-committed code (see
+# bin/fm-git-contain-lib.sh).
+# shellcheck source=bin/fm-git-contain-lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-git-contain-lib.sh"
 SUB_HOME_MARKER="${SUB_HOME_MARKER:-$FM_SECONDMATE_HOME_MARKER}"
 
 # --- helpers ---------------------------------------------------------------
@@ -36,13 +41,13 @@ first_line() {
 
 default_branch() {
   local dir=$1 ref branch
-  ref=$(git -C "$dir" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
+  ref=$(fm_git -C "$dir" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
   if [ -n "$ref" ]; then
     echo "${ref#origin/}"
     return 0
   fi
   for branch in main master; do
-    if git -C "$dir" show-ref --verify --quiet "refs/heads/$branch"; then
+    if fm_git -C "$dir" show-ref --verify --quiet "refs/heads/$branch"; then
       echo "$branch"
       return 0
     fi
@@ -58,7 +63,7 @@ default_branch() {
 primary_head_commit() {
   local root=$1 default
   default=$(default_branch "$root") || return 1
-  git -C "$root" rev-parse --verify --quiet "refs/heads/$default^{commit}" 2>/dev/null || return 1
+  fm_git -C "$root" rev-parse --verify --quiet "refs/heads/$default^{commit}" 2>/dev/null || return 1
 }
 
 resolve_path() {
@@ -196,13 +201,13 @@ validate_secondmate_home() {
 FETCHED=""
 fetch_once() {
   local dir=$1 common
-  common=$(git -C "$dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
+  common=$(fm_git -C "$dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
   if [ -n "$common" ]; then
     case " $FETCHED " in
       *" $common "*) return 0 ;;
     esac
   fi
-  if git -C "$dir" fetch origin --prune --quiet 2>/dev/null; then
+  if fm_git -C "$dir" fetch origin --prune --quiet 2>/dev/null; then
     [ -n "$common" ] && FETCHED="$FETCHED $common"
     return 0
   fi
@@ -215,7 +220,7 @@ fetch_once() {
 changed_instr() {
   local dir=$1 base=$2 p out=""
   for p in AGENTS.md bin .agents/skills; do
-    if ! git -C "$dir" diff --quiet HEAD "$base" -- "$p" 2>/dev/null; then
+    if ! fm_git -C "$dir" diff --quiet HEAD "$base" -- "$p" 2>/dev/null; then
       out="$out${out:+, }$p"
     fi
   done
@@ -225,9 +230,9 @@ changed_instr() {
 dirty_status() {
   local dir=$1 ignore_seed_marker=${2:-no}
   if [ "$ignore_seed_marker" = yes ]; then
-    git -C "$dir" status --porcelain 2>/dev/null | awk -v marker="?? $SUB_HOME_MARKER" '$0 != marker { print; exit }'
+    fm_git -C "$dir" status --porcelain 2>/dev/null | awk -v marker="?? $SUB_HOME_MARKER" '$0 != marker { print; exit }'
   else
-    git -C "$dir" status --porcelain 2>/dev/null | head -1
+    fm_git -C "$dir" status --porcelain 2>/dev/null | head -1
   fi
 }
 
@@ -257,7 +262,7 @@ ff_target() {
     echo "$label: skipped: not a directory"
     return 0
   fi
-  if ! git -C "$dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  if ! fm_git -C "$dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     echo "$label: skipped: not a git repo"
     return 0
   fi
@@ -270,7 +275,7 @@ ff_target() {
 
   # Resolve the fast-forward base from base_mode (see header).
   if [ "$base_mode" = origin ]; then
-    if ! git -C "$dir" remote get-url origin >/dev/null 2>&1; then
+    if ! fm_git -C "$dir" remote get-url origin >/dev/null 2>&1; then
       echo "$label: skipped: no origin remote"
       return 0
     fi
@@ -283,12 +288,12 @@ ff_target() {
     base="$base_mode"
   fi
 
-  if ! git -C "$dir" rev-parse --verify --quiet "$base^{commit}" >/dev/null; then
+  if ! fm_git -C "$dir" rev-parse --verify --quiet "$base^{commit}" >/dev/null; then
     echo "$label: skipped: $base does not exist"
     return 0
   fi
 
-  cur=$(git -C "$dir" symbolic-ref --short HEAD 2>/dev/null || echo "")
+  cur=$(fm_git -C "$dir" symbolic-ref --short HEAD 2>/dev/null || echo "")
   if [ -z "$cur" ] && [ "$allow_detached" != yes ]; then
     echo "$label: skipped: detached HEAD, expected $default"
     return 0
@@ -303,11 +308,11 @@ ff_target() {
     return 0
   fi
 
-  local_rev=$(git -C "$dir" rev-parse HEAD 2>/dev/null) || {
+  local_rev=$(fm_git -C "$dir" rev-parse HEAD 2>/dev/null) || {
     echo "$label: skipped: cannot read HEAD"
     return 0
   }
-  base_rev=$(git -C "$dir" rev-parse "$base" 2>/dev/null) || {
+  base_rev=$(fm_git -C "$dir" rev-parse "$base" 2>/dev/null) || {
     echo "$label: skipped: cannot read $base"
     return 0
   }
@@ -316,18 +321,18 @@ ff_target() {
     echo "$label: already current"
     return 0
   fi
-  if ! git -C "$dir" merge-base --is-ancestor HEAD "$base" 2>/dev/null; then
+  if ! fm_git -C "$dir" merge-base --is-ancestor HEAD "$base" 2>/dev/null; then
     echo "$label: skipped: diverged from $base"
     return 0
   fi
 
   instr=$(changed_instr "$dir" "$base")
-  before=$(git -C "$dir" rev-parse --short HEAD)
-  if ! out=$(git -C "$dir" merge --ff-only "$base" 2>&1); then
+  before=$(fm_git -C "$dir" rev-parse --short HEAD)
+  if ! out=$(fm_git -C "$dir" merge --ff-only "$base" 2>&1); then
     echo "$label: skipped: fast-forward failed: $(first_line "$out")"
     return 0
   fi
-  after=$(git -C "$dir" rev-parse --short HEAD)
+  after=$(fm_git -C "$dir" rev-parse --short HEAD)
   FF_STATUS="updated"
   FF_INSTR="$instr"
   if [ -n "$instr" ]; then

@@ -112,6 +112,33 @@ Blind auto-propagation would be unsafe because secondmate homes and firstmate-on
 The whole feature is a silent no-op when the file is absent (the shared-template default) and emits one stderr warning when the file is present but unparseable.
 The file is entirely optional and lives only in this captain's fleet, so it is never committed to the shared template.
 
+## Committed git hooks (core.hooksPath)
+
+A project that wants its git hooks reviewable and travelling with the repo has to commit them, and the only way git runs a committed hooks directory is `core.hooksPath`.
+The alternative, `.git/hooks`, is not version-controlled and does not survive a fresh clone - and crews here work in treehouse pools created and destroyed constantly, so that loss is the routine case rather than a rare one.
+`core.hooksPath`'s one real drawback is that it needs a config step per clone, and `bin/fm-spawn.sh` is that step: it applies `bin/fm-hooks-path-lib.sh` in every worktree and secondmate home it launches into, on the same repo-local-config mechanism as the agent commit identity above.
+That coupling is load-bearing rather than incidental: if spawn ever stops making the call, every project's committed hooks silently stop applying to every crew worktree, because an absent hook is not a git failure - it is simply nothing happening.
+
+The write is deliberately conditional, because `core.hooksPath` overrides `.git/hooks` entirely and spawn launches into every project in the fleet, not only the ones adopting committed hooks.
+Three conditions must hold, and each failure leaves the repo exactly as it was: the hooks directory (`FM_HOOKS_DIR`, default `.githooks`) is both tracked in that worktree's index and checked out with at least one file in it; no `core.hooksPath` is already set in any scope; and the repo's real hooks directory holds no active hook, where any non-`*.sample` entry counts, including a symlink or a dangling one.
+Conditions 2 and 3 preserve-and-report rather than overwrite, matching the `config/git-author` precedent, and the active-hook warning names every entry it found so a false positive such as a stray `.DS_Store` is diagnosable in seconds instead of a recurring mystery block.
+Condition 2 reads the effective value across every scope, which is stricter than the identity precedent on purpose: an unset identity falls back to something git derives on its own, whereas a `core.hooksPath` in global config is by definition something a human set deliberately.
+Condition 3 also fails closed and says why: on a git older than 2.31, which has no `rev-parse --path-format`, the `.git/hooks` guard cannot answer, so the write is skipped with a warning rather than silently, since a silent fleet-wide disable is indistinguishable from working.
+
+Before any of those, firstmate's own repo-local value is validated rather than short-circuited past: a value equal to the committed hooks directory that names a path no longer present is reported to stderr, naming the stale value, because condition 1 would otherwise return first and hide it - and a defect that disables its own detection is worse than one that merely fails quietly.
+That staleness check is scoped to firstmate's own `--local` value and never to an effective one from any scope; husky legitimately sets `core.hooksPath=.husky/_` while `.husky/_` is gitignored, so an unscoped check would call a correctly-configured project broken on every spawn and its suggested remedy would break it.
+
+The value written is relative, never absolute, and that is a correctness requirement.
+`git config --local` from a linked worktree resolves to the pooled clone's shared common config, so the write is pool-wide; a relative path re-resolves against each checkout's own working-tree root, so each one runs its own committed hooks and a pool-mate whose branch lacks the directory simply runs none.
+An absolute path would instead pin the whole pool to one crew worktree's copy and break the moment that worktree is torn down.
+The whole feature is advisory and never fatal: a hook is a safety net, and failing to install one must never fail a spawn.
+
+Because the write is pool-wide it also reaches the `projects/<name>` primary checkout, which firstmate fleet-syncs and tears down unattended in the session holding the fleet's credentials and `.env`.
+Firstmate's own automated git operations must never execute repo-committed code, so every git call firstmate automation makes goes through the `fm_git` helper in `bin/fm-git-contain-lib.sh`, which runs `git -c core.hooksPath=/dev/null` for that invocation; the containment ships with the write rather than after it, and `tests/fm-git-contain.test.sh` lints `bin/` and fails on any new uncontained call site so the class stays closed.
+`fm_git` refuses `git push` outright instead of containing it: the `-c` override propagates through `GIT_CONFIG_PARAMETERS` into locally-spawned transport processes, and for a file-path remote `git-receive-pack` is a direct child, so a contained push would silently suppress the remote's server-side `pre-receive`/`update`/`post-receive` hooks - including the local no-mistakes gate's own `post-receive`.
+A push whose server-side hooks matter therefore goes through plain `git` from a call site that has decided that explicitly.
+One boundary is stated rather than papered over: treehouse runs its own `git worktree add` inside the treehouse binary, so its `post-checkout` firing is outside anything a helper in `bin/` can reach.
+
 ## FM_HOME
 
 `FM_HOME` selects the operational home for one firstmate instance.
@@ -195,6 +222,7 @@ FM_STATE_OVERRIDE=       # alternate state dir, mainly for tests
 FM_DATA_OVERRIDE=        # alternate data dir, mainly for tests
 FM_PROJECTS_OVERRIDE=    # alternate projects dir, mainly for tests
 FM_CONFIG_OVERRIDE=      # alternate config dir, mainly for tests
+FM_HOOKS_DIR=.githooks  # committed hooks directory fm-spawn points core.hooksPath at; the value written is always this relative path
 FM_POLL=15              # seconds between watcher poll cycles
 FM_HEARTBEAT=600        # base seconds between heartbeat scans; no-change heartbeats are absorbed while idle
 FM_HEARTBEAT_MAX=7200   # heartbeat backoff cap

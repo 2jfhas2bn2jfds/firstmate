@@ -42,7 +42,12 @@ See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/star
   Each starts with a usage header comment; keep it accurate when you change behavior.
   Test scripts and helpers in `tests/` are plain bash too.
   `shellcheck bin/*.sh tests/*.sh` must pass, and CI enforces it.
+  Git calls in `bin/` go through `fm_git` from `bin/fm-git-contain-lib.sh`, which disables committed hooks for that invocation, because firstmate's own unattended git operations must never execute repo-committed code.
+  `tests/fm-git-contain.test.sh` lints `bin/` for a bare `git -C` or `git clone` and fails on a new uncontained call site, so the class stays closed rather than re-opening one commit at a time.
+  The single allowance is `git -C ... config`, which runs no hook and must stay bare because the containment flag is itself config and would perturb the values `fm-git-author-lib.sh` and `fm-hooks-path-lib.sh` inspect; add no per-file exclusions.
+  `fm_git` refuses `git push` outright, so a push whose server-side hooks matter uses plain `git` from a call site that has decided that explicitly.
   In a test, always `mkdir -p` a case directory under `TMP_ROOT` before writing into it.
+  Call `fm_git_isolate` from `tests/lib.sh` next to `fm_git_identity` in any suite whose behavior depends on non-local git config being absent; `fm_git_identity` only pins fixture-commit authorship, so a suite reading the effective config still sees the developer's `~/.gitconfig`.
   `fm_test_tmproot` registers its cleanup trap from inside a command substitution, and bash runs an `EXIT` trap when that subshell exits, so the root is already gone by the time the path is echoed back.
   Every existing suite works only because it recreates its own case directories.
   The helper's own header comment in `tests/lib.sh` describes this accurately; the underlying trap defect is tracked as its own work item.
@@ -92,6 +97,8 @@ tests/fm-secondmate-safety.test.sh        # secondmate home safety, idle charter
 tests/fm-teardown.test.sh                 # fm-teardown.sh landed-work safety and reminder checks: fork-remote allow, squash/content landings, dirty and unlanded refusals, PR-head metadata, tasks-axi reminder, --force override
 tests/fm-crew-state.test.sh               # fm-crew-state.sh current-state reconciliation: run-step authority including closed panes, stale needs-decision/blocked superseded by a resumed run, genuine-parked, cross-branch attribution, pane/status-log fallback, scout skip, torn-down/missing-meta graceful
 tests/fm-git-author.test.sh               # config/git-author agent commit identity: parsing, per-field apply, idempotence, absent no-op, conflict-preserve, malformed warn-once, spawn worktree and bootstrap primary integration
+tests/fm-hooks-path.test.sh               # committed-hooks core.hooksPath apply: the three conditions and their no-ops, relative value, conflict-preserve in local and non-local scope, scoped staleness report, over-inclusive active-hook block naming every entry, fail-closed unresolvable common dir, and spawn worktree integration
+tests/fm-git-contain.test.sh              # fm_git containment: positive control that the hooks genuinely fire uncontained, per-invocation suppression, contained fleet-sync/merge-local/review-diff paths, the bin/ call-site lint and a control proving it catches a new offender, passthrough, and the git push refusal
 tests/fm-busyshell.test.sh                # claude background-shell footer busy signature: both live footer forms, plural shells, shell+monitor lists, transcript-prose and unanchored-footer negatives, spinner distinctness, harness=claude gating, preserved run-step-first order
 [ "$(readlink CLAUDE.md)" = "AGENTS.md" ]
 [ "$(readlink .claude/skills)" = "../.agents/skills" ]

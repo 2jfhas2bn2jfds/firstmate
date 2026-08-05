@@ -45,6 +45,11 @@ Its injection path shares `bin/fm-tmux-lib.sh` with `fm-send.sh`, so dim-ghost-a
 Crewmates never intentionally touch your project clone; [treehouse](https://github.com/kunchenguid/treehouse) pools clean worktrees so parallel tasks on one repo cannot collide.
 For ship and scout work, `fm-spawn.sh` waits for `treehouse get` and then refuses to launch unless the pane resolves to a real git worktree root that is distinct from the project primary checkout.
 
+Pooled worktrees are also why committed git hooks need a spawn-time step at all: `.git/hooks` is not version-controlled and dies with the pool, so `core.hooksPath` is the only mechanism that survives, and `fm-spawn.sh` is the per-clone config step that sets it.
+The write is conditional and preserve-and-report, so it can never silently disable hooks a project already relies on, and the relative value it writes lets each checkout in a shared pool run its own committed hooks.
+That same pool-wide reach means the project's primary checkout inherits it too, and firstmate drives that checkout unattended, so every git call firstmate automation makes goes through `fm_git` (`bin/fm-git-contain-lib.sh`) and runs with hooks disabled - with `git push` refused outright, since the containment flag would propagate into `git-receive-pack` and suppress a remote's server-side hooks.
+[configuration.md](configuration.md) documents the conditions, the staleness check, and the treehouse boundary the containment cannot reach.
+
 The firstmate repo has one extra exposure because it can dispatch crewmates to work on itself.
 Its operating checkout (`FM_ROOT`) and the disposable crewmate worktrees are all linked git worktrees of the same repository, so the valid discriminator is branch state, not whether the checkout is linked.
 The primary checkout is healthy on its default branch, and linked worktrees or secondmate homes are healthy at detached HEAD.

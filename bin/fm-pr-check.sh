@@ -9,6 +9,8 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+# shellcheck source=bin/fm-git-contain-lib.sh
+. "$SCRIPT_DIR/fm-git-contain-lib.sh"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 "$FM_ROOT/bin/fm-guard.sh" || true
 ID=$1
@@ -20,7 +22,7 @@ if [ -f "$META" ]; then
   LOCAL_HEAD=
   PR_HEAD=
   if [ -n "$WT" ] && [ -d "$WT" ]; then
-    LOCAL_HEAD=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null || true)
+    LOCAL_HEAD=$(fm_git -C "$WT" rev-parse --verify HEAD 2>/dev/null || true)
     if [ -n "$LOCAL_HEAD" ] && command -v gh >/dev/null 2>&1; then
       if REMOTE_HEAD=$(cd "$WT" && gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null); then
         if [ "$LOCAL_HEAD" = "$REMOTE_HEAD" ]; then

@@ -17,17 +17,23 @@
 # default branch. Detached HEAD on the default is fine; a feature branch in a
 # primary checkout is the alarm.
 
+# Every git call in this library goes through fm_git, which disables committed
+# hooks: firstmate automation must never execute repo-committed code (see
+# bin/fm-git-contain-lib.sh).
+# shellcheck source=bin/fm-git-contain-lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-git-contain-lib.sh"
+
 # Resolve the default branch name of the git repo at <dir>: prefer origin/HEAD,
 # then fall back to a local main/master. Echoes the name, or returns 1.
 fm_default_branch() {
   local dir=$1 ref branch
-  ref=$(git -C "$dir" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
+  ref=$(fm_git -C "$dir" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
   if [ -n "$ref" ]; then
     printf '%s\n' "${ref#origin/}"
     return 0
   fi
   for branch in main master; do
-    if git -C "$dir" show-ref --verify --quiet "refs/heads/$branch"; then
+    if fm_git -C "$dir" show-ref --verify --quiet "refs/heads/$branch"; then
       printf '%s\n' "$branch"
       return 0
     fi
@@ -43,8 +49,8 @@ fm_default_branch() {
 # out in a primary checkout does.
 fm_primary_tangle_branch() {
   local root=$1 cur default
-  git -C "$root" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 1
-  cur=$(git -C "$root" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+  fm_git -C "$root" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 1
+  cur=$(fm_git -C "$root" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
   [ -n "$cur" ] || return 1
   default=$(fm_default_branch "$root") || return 1
   [ "$cur" = "$default" ] && return 1
